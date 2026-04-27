@@ -1,8 +1,6 @@
 "use client";
 
 import { useState, useRef, useCallback, useEffect } from "react";
-import { useSession } from "next-auth/react";
-import { redirect } from "next/navigation";
 import * as XLSX from "xlsx";
 
 function cleanUpc(val) {
@@ -65,12 +63,8 @@ function fmtDollars(v) { return v != null ? `$${v.toFixed(2)}` : "—"; }
 function fmtPct(v) { return v != null ? `${v.toFixed(1)}%` : "—"; }
 
 export default function AnalyzePage() {
-  const { data: session, status } = useSession();
-
-  useEffect(() => {
-    if (status === "unauthenticated") redirect("/auth");
-  }, [status]);
-
+  const [apiKey, setApiKey] = useState("");
+  const [showKey, setShowKey] = useState(false);
   const [file, setFile] = useState(null);
   const [fileName, setFileName] = useState("");
   const [dragOver, setDragOver] = useState(false);
@@ -132,6 +126,7 @@ export default function AnalyzePage() {
   };
 
   const runAnalysis = async () => {
+    if (!apiKey.trim()) { alert("Please enter your Keepa API key."); return; }
     if (!file) { alert("Please upload your linesheet file."); return; }
 
     setRunning(true); setResults([]); setLogs([]); setProgress(0); setView("analysis");
@@ -179,7 +174,7 @@ export default function AnalyzePage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          items,
+          items, apiKey: apiKey.trim(),
           settings: {
             threshold, minRoi, overhead, minProfit, priceBasis,
             pbMap: { current: pbCurrent, avg30: pbAvg30, avg90: pbAvg90, avg180: pbAvg180, avg365: pbAvg365 },
@@ -313,7 +308,14 @@ export default function AnalyzePage() {
             <p className="text-ottrd-muted text-lg max-w-xl mx-auto leading-relaxed">Upload your supplier linesheet. We pull 12 months of Keepa data, calculate true ROI, and generate your purchase order.</p>
           </div>
 
-          <Sec title="Step 1 - Upload linesheet" d="0s">
+          <Sec title="Step 1 - Keepa API key" d="0s">
+            <div className="flex gap-3">
+              <input type={showKey?"text":"password"} value={apiKey} onChange={e=>setApiKey(e.target.value)} placeholder="Paste your Keepa API key (keepa.com/#!api)" className="flex-1 bg-ottrd-bg border border-ottrd-border rounded-lg px-4 py-3 text-ottrd-text placeholder:text-ottrd-muted/50 focus:outline-none focus:border-ottrd-accent transition-colors font-mono text-sm"/>
+              <button onClick={()=>setShowKey(!showKey)} className="px-4 py-3 bg-ottrd-bg border border-ottrd-border rounded-lg text-ottrd-muted hover:text-ottrd-text text-sm transition-colors">{showKey?"Hide":"Show"}</button>
+            </div>
+          </Sec>
+
+          <Sec title="Step 2 - Upload linesheet" d="0.1s">
             <div className={`drop-zone border-2 border-dashed rounded-xl p-10 text-center cursor-pointer transition-all ${dragOver?"drag-over border-ottrd-accent":"border-ottrd-border hover:border-ottrd-muted"}`}
               onClick={()=>fileInputRef.current?.click()} onDragOver={e=>{e.preventDefault();setDragOver(true);}} onDragLeave={()=>setDragOver(false)} onDrop={onDrop}>
               <input ref={fileInputRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={e=>e.target.files[0]&&handleFile(e.target.files[0])}/>
@@ -323,7 +325,7 @@ export default function AnalyzePage() {
             <p className="text-ottrd-muted/60 text-xs mt-3">Needs a UPC column and a cost/price column at minimum.</p>
           </Sec>
 
-          <Sec title="Step 2 - Deal thresholds" d="0.1s">
+          <Sec title="Step 3 - Deal thresholds" d="0.1s">
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
               <SI label="Sales threshold" value={threshold} onChange={setThreshold} suffix="/mo"/>
               <SI label="Min ROI %" value={minRoi} onChange={setMinRoi} suffix="%"/>
@@ -333,9 +335,9 @@ export default function AnalyzePage() {
             <p className="text-ottrd-muted/50 text-xs mt-3">SKUs below min profit $ but above min ROI% are flagged orange. Overhead adds a % to cost for freight, prep, supplies.</p>
           </Sec>
 
-          <Sec title="Step 3 - Price basis for ROI" d="0.2s">
+          <Sec title="Step 4 - Price basis for ROI" d="0.2s">
             <div className="flex flex-wrap gap-2 mb-4">
-              {[["min_selected","Min of selected"],["current","Today's BB"],["avg30","30-day avg"],["avg90","90-day avg"],["avg180","180-day avg"],["avg365","365-day avg"],["monthly_low","Monthly low (Step 5)"]].map(([v,l])=>(
+              {[["min_selected","Min of selected"],["current","Today's BB"],["avg30","30-day avg"],["avg90","90-day avg"],["avg180","180-day avg"],["avg365","365-day avg"],["monthly_low","Monthly low (Step 6)"]].map(([v,l])=>(
                 <button key={v} onClick={()=>setPriceBasis(v)} className={`px-3 py-2 rounded-lg text-sm border transition-all ${priceBasis===v?"bg-ottrd-accent/20 border-ottrd-accent text-ottrd-accent":"border-ottrd-border text-ottrd-muted hover:text-ottrd-text"}`}>{l}</button>
               ))}
             </div>
@@ -350,7 +352,7 @@ export default function AnalyzePage() {
             <p className="text-ottrd-muted/50 text-xs mt-3">Tip: "Min of selected" is the most conservative - uses the lowest price across your chosen windows.</p>
           </Sec>
 
-          <Sec title="Step 4 - Peak sales months and order qty" d="0.3s">
+          <Sec title="Step 5 - Peak sales months and order qty" d="0.3s">
             <p className="text-ottrd-muted text-sm mb-3">Include only these months when calculating peak sales and suggested order qty:</p>
             <div className="flex flex-wrap gap-2 mb-4">
               {MONTH_NAMES.map(m=>(<button key={m} onClick={()=>setMonthFilters(prev=>({...prev,[m]:!prev[m]}))} className={`w-12 py-2 rounded-lg text-xs font-medium border transition-all ${monthFilters[m]?"bg-ottrd-accent/20 border-ottrd-accent text-ottrd-accent":"border-ottrd-border text-ottrd-muted hover:text-ottrd-text"}`}>{m}</button>))}
@@ -375,7 +377,7 @@ export default function AnalyzePage() {
             </div>
           </Sec>
 
-          <Sec title="Step 5 - Monthly price history (optional)" d="0.4s">
+          <Sec title="Step 6 - Monthly price history (optional)" d="0.4s">
             <p className="text-ottrd-muted text-sm mb-3">Select months to analyse: avg price, lowest price, and days at lowest price.</p>
             <div className="grid grid-cols-3 md:grid-cols-6 gap-2 mb-4">
               {phOptions.map(o=>(<button key={o.key} onClick={()=>setPhSelected(prev=>({...prev,[o.key]:!prev[o.key]}))} className={`py-2 rounded-lg text-xs font-medium border transition-all ${phSelected[o.key]?"bg-ottrd-accent/20 border-ottrd-accent text-ottrd-accent":"border-ottrd-border text-ottrd-muted hover:text-ottrd-text"}`}>{o.label}</button>))}
