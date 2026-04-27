@@ -3,6 +3,8 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import * as XLSX from "xlsx";
 
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
 function cleanUpc(val) {
   let s = String(val).trim();
   if (s.toLowerCase().includes("e")) {
@@ -59,8 +61,10 @@ function phMonthOptions() {
 
 const MONTH_NAMES = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 
-function fmtDollars(v) { return v != null ? `$${v.toFixed(2)}` : "—"; }
-function fmtPct(v) { return v != null ? `${v.toFixed(1)}%` : "—"; }
+function fmtDollars(v) { return v != null ? `$${v.toFixed(2)}` : "\u2014"; }
+function fmtPct(v) { return v != null ? `${v.toFixed(1)}%` : "\u2014"; }
+
+// ── Main App ─────────────────────────────────────────────────────────────────
 
 export default function Home() {
   const [apiKey, setApiKey] = useState("");
@@ -125,6 +129,8 @@ export default function Home() {
     setMonthFilters(Object.fromEntries(MONTH_NAMES.map(m => [m, last6.has(m)])));
   };
 
+  // ── Run analysis ───────────────────────────────────────────────────────────
+
   const runAnalysis = async () => {
     if (!apiKey.trim()) { alert("Please enter your Keepa API key."); return; }
     if (!file) { alert("Please upload your linesheet file."); return; }
@@ -136,7 +142,7 @@ export default function Home() {
     const ws = wb.Sheets[wb.SheetNames[0]];
     const rows = XLSX.utils.sheet_to_json(ws, { defval: "" });
 
-    if (!rows.length) { setLogs(prev => [...prev, { message: "No data rows found in file.", type: "error" }]); setRunning(false); return; }
+    if (!rows.length) { setLogs(prev => [...prev, { message: "\u274C No data rows found in file.", type: "error" }]); setRunning(false); return; }
 
     const columns = Object.keys(rows[0]);
     const upcCol = autoCol(columns, ["upc","barcode","ean","gtin","code"]);
@@ -148,8 +154,8 @@ export default function Home() {
     if (!costCol) { alert("Can't find cost column in your file."); setRunning(false); return; }
 
     setLogs(prev => [...prev,
-      { message: `Loaded: ${fileName} - ${rows.length} rows`, type: "info" },
-      { message: `UPC: ${upcCol} | Cost: ${costCol} | Name: ${nameCol || "(none)"} | SKU: ${skuCol || "(none)"}` },
+      { message: `\uD83D\uDCC2 Loaded: ${fileName} \u2014 ${rows.length} rows`, type: "info" },
+      { message: `\uD83D\uDCCB UPC \u2192 ${upcCol} | Cost \u2192 ${costCol} | Name \u2192 ${nameCol || "(none)"} | SKU \u2192 ${skuCol || "(none)"}` },
     ]);
 
     const items = [];
@@ -163,8 +169,8 @@ export default function Home() {
       items.push({ upc: primary, variants, cost, name: nameCol ? String(row[nameCol]).trim() : "", sku: skuCol ? String(row[skuCol]).trim() : "" });
     }
 
-    if (!items.length) { setLogs(prev => [...prev, { message: "No valid rows found.", type: "error" }]); setRunning(false); return; }
-    setLogs(prev => [...prev, { message: `Valid items: ${items.length}`, type: "success" }]);
+    if (!items.length) { setLogs(prev => [...prev, { message: "\u274C No valid rows found.", type: "error" }]); setRunning(false); return; }
+    setLogs(prev => [...prev, { message: `\u2705 Valid items: ${items.length}`, type: "success" }]);
 
     const activeMonths = MONTH_NAMES.map((m, i) => monthFilters[m] ? i + 1 : null).filter(Boolean);
     const phTargetMonths = phOptions.filter(o => phSelected[o.key]).map(o => [o.year, o.month]);
@@ -199,15 +205,17 @@ export default function Home() {
             if (p.event === "log") setLogs(prev => [...prev, { message: p.message, type: p.type || "default" }]);
             else if (p.event === "progress") { setProgress(p.pct); setProgressMsg(p.message); }
             else if (p.event === "results") { setResults(p.results); setMonthKeys(p.monthKeys); setView("results"); }
-            else if (p.event === "error") setLogs(prev => [...prev, { message: p.message, type: "error" }]);
+            else if (p.event === "error") setLogs(prev => [...prev, { message: `\u274C ${p.message}`, type: "error" }]);
           } catch {}
         }
       }
     } catch (e) {
-      setLogs(prev => [...prev, { message: `Network error: ${e.message}`, type: "error" }]);
+      setLogs(prev => [...prev, { message: `\u274C Network error: ${e.message}`, type: "error" }]);
     }
     setRunning(false);
   };
+
+  // ── Excel export (5 sheets — full parity) ──────────────────────────────────
 
   const exportExcel = () => {
     if (!results.length) return;
@@ -217,27 +225,30 @@ export default function Home() {
     for (const r of results) for (const k of Object.keys(r.monthlyPh || {})) phKeysSet.add(k);
     const phKeys = [...phKeysSet].sort();
 
-    const phH = []; for (const k of phKeys) phH.push(`${k} Avg $`, `${k} Low $`, `${k} Days@Low`);
-    if (phKeys.length) phH.push("Monthly Low $");
+    // Sheet 1: Deal Analysis
+    const phH = []; for (const k of phKeys) phH.push(`${k}\nAvg $`, `${k}\nLow $`, `${k}\nDays@Low`);
+    if (phKeys.length) phH.push("Monthly\nLow $");
     const fH = ["SKU","UPC","ASIN","Product Name","Invoice Cost","True Cost (w/ OH%)","Current BB","30d Avg BB","90d Avg BB","180d Avg BB","365d Avg BB","Price Used for ROI","Ref Fee %","Ref $","P&P Fee","Fee Source","Total FBA","Net Sale","Net Profit","ROI %",`Ever ${threshold}+ in 12mo`,"Peak (All)","Peak (Selected)","Avg (Selected)","Sug Qty","Qty Basis","Target Buy","Gap to Target","% Off Needed","Decision"];
     const s1 = [[...fH, ...phH, ...mk]];
     for (const r of results) {
       const gap = r.priceGap;
-      const gS = gap != null ? (gap <= 0 ? "On target" : `Need $${gap.toFixed(2)} lower`) : "—";
-      const pS = r.pctOffNeeded != null ? (r.pctOffNeeded <= 0 ? "On target" : `${r.pctOffNeeded.toFixed(1)}% off needed`) : "—";
+      const gS = gap != null ? (gap <= 0 ? "\u2713 On target" : `Need $${gap.toFixed(2)} lower`) : "\u2014";
+      const pS = r.pctOffNeeded != null ? (r.pctOffNeeded <= 0 ? "\u2713 On target" : `${r.pctOffNeeded.toFixed(1)}% off needed`) : "\u2014";
       const eH = Object.values(r.monthly||{}).some(v => v >= threshold);
-      const fV = [r.sku,r.upc,r.asin,r.title,r.cost,r.trueCost,r.priceCurrent,r.priceAvg30,r.priceAvg90,r.priceAvg180,r.priceAvg365,r.amzPrice,r.referralPct,r.referralFee,r.ppFee,r.feeSource,r.fbaFee,r.netSale,r.netProfit,r.roi,eH?"YES":"NO",r.peakAll||"",r.peakFiltered||"",r.avgFiltered||"",r.suggestedQty||"",r.qtyBasis,r.targetSupplier,gS,pS,r.decision];
+      const fV = [r.sku,r.upc,r.asin,r.title,r.cost,r.trueCost,r.priceCurrent,r.priceAvg30,r.priceAvg90,r.priceAvg180,r.priceAvg365,r.amzPrice,r.referralPct,r.referralFee,r.ppFee,r.feeSource,r.fbaFee,r.netSale,r.netProfit,r.roi,eH?"YES \u2713":"NO \u2717",r.peakAll||"",r.peakFiltered||"",r.avgFiltered||"",r.suggestedQty||"",r.qtyBasis,r.targetSupplier,gS,pS,r.decision];
       const pV = []; for (const k of phKeys) { const d=(r.monthlyPh||{})[k]; pV.push(d?d.avg:null,d?d.low:null,d?d.days_at_low:null); }
       if (phKeys.length) pV.push(r.monthlyLowPrice||null);
       s1.push([...fV,...pV,...mk.map(m=>(r.monthly||{})[m]??"")]);
     }
     const ws1 = XLSX.utils.aoa_to_sheet(s1);
 
+    // Sheet 2: Buy List
     const bR = results.filter(r => r.decision==="Buy"||r.decision==="Review");
     const bH = ["SKU","UPC","ASIN","Product Name","Invoice Cost","True Cost","Amz Price","Net Profit","ROI %","Target Buy","Gap","% Off","Peak (Sel)","Avg (Sel)","Sug Qty","Qty Basis","Decision"];
-    const s2 = [bH,...bR.map(r => { const g=r.priceGap; return [r.sku,r.upc,r.asin,r.title,r.cost,r.trueCost,r.amzPrice,r.netProfit,r.roi,r.targetSupplier,g!=null?(g<=0?"On target":`Need $${g.toFixed(2)} lower`):"—",r.pctOffNeeded!=null?(r.pctOffNeeded<=0?"On target":`${r.pctOffNeeded.toFixed(1)}%`):"—",r.peakFiltered,r.avgFiltered,r.suggestedQty,r.qtyBasis,r.decision]; })];
+    const s2 = [bH,...bR.map(r => { const g=r.priceGap; return [r.sku,r.upc,r.asin,r.title,r.cost,r.trueCost,r.amzPrice,r.netProfit,r.roi,r.targetSupplier,g!=null?(g<=0?"\u2713 On target":`Need $${g.toFixed(2)} lower`):"\u2014",r.pctOffNeeded!=null?(r.pctOffNeeded<=0?"\u2713 On target":`${r.pctOffNeeded.toFixed(1)}%`):"\u2014",r.peakFiltered,r.avgFiltered,r.suggestedQty,r.qtyBasis,r.decision]; })];
     const ws2 = XLSX.utils.aoa_to_sheet(s2);
 
+    // Sheet 3: Summary
     const nB=results.filter(r=>r.decision==="Buy").length, nR=results.filter(r=>r.decision==="Review").length, nP=results.filter(r=>r.decision==="Pass").length, nN=results.filter(r=>!r.found).length;
     const eC=results.filter(r=>Object.values(r.monthly||{}).some(v=>v>=threshold)).length;
     const po=results.filter(r=>r.decision==="Buy"||r.decision==="Review");
@@ -247,11 +258,13 @@ export default function Home() {
     const aR=rs.length?rs.reduce((a,b)=>a+b,0)/rs.length:0;
     const ws3 = XLSX.utils.aoa_to_sheet([["DEAL SUMMARY",""],["Generated",new Date().toISOString().split("T")[0]],["Threshold",`${threshold}+ sales in any month`],["",""],["Total SKUs analyzed",results.length],[`Ever hit ${threshold}+ in 12 months`,eC],["",""],["Buy decisions",nB],["Review decisions",nR],["Pass decisions",nP],["Not found in Keepa",nN],["",""],["Estimated total PO cost",`$${tC.toFixed(2)}`],["Estimated total profit",`$${tP.toFixed(2)}`],["Average ROI on buy items",`${aR.toFixed(1)}%`]]);
 
+    // Sheet 4: Target PO
     const tH = ["Product Name","UPC","ASIN","Quantity","Target Buy Price","% Off Needed","Min Profit Flag"];
     const tR = results.filter(r=>(r.decision==="Buy"||r.decision==="Review")&&(r.suggestedQty||0)>0);
-    const s4 = [tH,...tR.map(r => { const g=r.priceGap; let pN=null; if(r.targetSupplier!=null&&r.cost>0) pN=g!=null&&g<=0?0:Math.round(((r.cost-r.targetSupplier)/r.cost)*1000)/10; return [r.title,r.upc,r.asin,r.suggestedQty,r.targetSupplier,pN,r.lowProfit?"Below min $":"OK"]; })];
+    const s4 = [tH,...tR.map(r => { const g=r.priceGap; let pN=null; if(r.targetSupplier!=null&&r.cost>0) pN=g!=null&&g<=0?0:Math.round(((r.cost-r.targetSupplier)/r.cost)*1000)/10; return [r.title,r.upc,r.asin,r.suggestedQty,r.targetSupplier,pN,r.lowProfit?"\u26A0 Below min $":"\u2713 OK"]; })];
     const ws4 = XLSX.utils.aoa_to_sheet(s4);
 
+    // Sheet 5: Price History
     let ws5 = null;
     if (phKeys.length) {
       const pH = ["SKU","UPC","ASIN","Product Name"]; for (const k of phKeys) pH.push(`${k} Avg $`,`${k} Low $`,`${k} Days@Low`); pH.push("Overall Low $");
@@ -267,6 +280,8 @@ export default function Home() {
     if (ws5) XLSX.utils.book_append_sheet(workbook, ws5, "Price History");
     XLSX.writeFile(workbook, `keepa_analysis_${new Date().toISOString().split("T")[0]}.xlsx`);
   };
+
+  // ── Computed ───────────────────────────────────────────────────────────────
 
   const filteredResults = results.filter(r => {
     if (resultFilter === "buy") return r.decision === "Buy" || r.decision === "Review";
@@ -285,8 +300,11 @@ export default function Home() {
 
   const mk = monthKeys.length ? monthKeys : last12Months();
 
+  // ── Render ─────────────────────────────────────────────────────────────────
+
   return (
     <div className="min-h-screen">
+      {/* Header */}
       <header className="border-b border-ottrd-border bg-ottrd-surface/50 backdrop-blur-sm sticky top-0 z-50">
         <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -295,36 +313,40 @@ export default function Home() {
           </div>
           {view !== "landing" && (
             <button onClick={() => { setView("landing"); setResults([]); setLogs([]); setProgress(0); }}
-              className="text-sm text-ottrd-muted hover:text-ottrd-text transition-colors">New Analysis</button>
+              className="text-sm text-ottrd-muted hover:text-ottrd-text transition-colors">\u2190 New Analysis</button>
           )}
         </div>
       </header>
 
+      {/* ═══ LANDING ═══ */}
       {view === "landing" && (
         <main className="max-w-4xl mx-auto px-6 py-16 animate-fade-in">
           <div className="text-center mb-16">
             <h1 className="font-display text-5xl md:text-6xl text-ottrd-text mb-4 leading-tight">Amazon Deal<br/>Underwriting</h1>
-            <p className="text-ottrd-muted text-lg max-w-xl mx-auto leading-relaxed">Upload your supplier linesheet. We pull 12 months of Keepa data, calculate true ROI, and generate your purchase order.</p>
+            <p className="text-ottrd-muted text-lg max-w-xl mx-auto leading-relaxed">Upload your supplier linesheet. We pull 12 months of Keepa data, calculate true ROI, and generate your purchase order \u2014 in minutes.</p>
           </div>
 
-          <Sec title="Step 1 - Keepa API key" d="0s">
+          {/* Step 1 */}
+          <Sec title="Step 1 \u2014 Keepa API key" d="0s">
             <div className="flex gap-3">
               <input type={showKey?"text":"password"} value={apiKey} onChange={e=>setApiKey(e.target.value)} placeholder="Paste your Keepa API key (keepa.com/#!api)" className="flex-1 bg-ottrd-bg border border-ottrd-border rounded-lg px-4 py-3 text-ottrd-text placeholder:text-ottrd-muted/50 focus:outline-none focus:border-ottrd-accent transition-colors font-mono text-sm"/>
               <button onClick={()=>setShowKey(!showKey)} className="px-4 py-3 bg-ottrd-bg border border-ottrd-border rounded-lg text-ottrd-muted hover:text-ottrd-text text-sm transition-colors">{showKey?"Hide":"Show"}</button>
             </div>
           </Sec>
 
-          <Sec title="Step 2 - Upload linesheet" d="0.1s">
+          {/* Step 2 */}
+          <Sec title="Step 2 \u2014 Upload linesheet" d="0.1s">
             <div className={`drop-zone border-2 border-dashed rounded-xl p-10 text-center cursor-pointer transition-all ${dragOver?"drag-over border-ottrd-accent":"border-ottrd-border hover:border-ottrd-muted"}`}
               onClick={()=>fileInputRef.current?.click()} onDragOver={e=>{e.preventDefault();setDragOver(true);}} onDragLeave={()=>setDragOver(false)} onDrop={onDrop}>
               <input ref={fileInputRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={e=>e.target.files[0]&&handleFile(e.target.files[0])}/>
-              {fileName ? (<div><div className="text-3xl mb-2">{"📄"}</div><div className="text-ottrd-text font-medium">{fileName}</div><div className="text-ottrd-muted text-sm mt-1">Click or drop to replace</div></div>)
-              : (<div><div className="text-3xl mb-2">{"📄"}</div><div className="text-ottrd-muted">Drop your CSV or Excel file here</div><div className="text-ottrd-muted/50 text-sm mt-1">or click to browse</div></div>)}
+              {fileName ? (<div><div className="text-3xl mb-2">\uD83D\uDCC4</div><div className="text-ottrd-text font-medium">{fileName}</div><div className="text-ottrd-muted text-sm mt-1">Click or drop to replace</div></div>)
+              : (<div><div className="text-3xl mb-2">\uD83D\uDCC4</div><div className="text-ottrd-muted">Drop your CSV or Excel file here</div><div className="text-ottrd-muted/50 text-sm mt-1">or click to browse</div></div>)}
             </div>
             <p className="text-ottrd-muted/60 text-xs mt-3">Needs a UPC column and a cost/price column at minimum.</p>
           </Sec>
 
-          <Sec title="Step 3 - Deal thresholds" d="0.2s">
+          {/* Step 3 */}
+          <Sec title="Step 3 \u2014 Deal thresholds" d="0.2s">
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
               <SI label="Sales threshold" value={threshold} onChange={setThreshold} suffix="/mo"/>
               <SI label="Min ROI %" value={minRoi} onChange={setMinRoi} suffix="%"/>
@@ -334,9 +356,10 @@ export default function Home() {
             <p className="text-ottrd-muted/50 text-xs mt-3">SKUs below min profit $ but above min ROI% are flagged orange. Overhead adds a % to cost for freight, prep, supplies.</p>
           </Sec>
 
-          <Sec title="Step 4 - Price basis for ROI" d="0.3s">
+          {/* Step 4 */}
+          <Sec title="Step 4 \u2014 Price basis for ROI" d="0.3s">
             <div className="flex flex-wrap gap-2 mb-4">
-              {[["min_selected","Min of selected"],["current","Today's BB"],["avg30","30-day avg"],["avg90","90-day avg"],["avg180","180-day avg"],["avg365","365-day avg"],["monthly_low","Monthly low (Step 6)"]].map(([v,l])=>(
+              {[["min_selected","Min of selected"],["current","Today\u2019s BB"],["avg30","30-day avg"],["avg90","90-day avg"],["avg180","180-day avg"],["avg365","365-day avg"],["monthly_low","Monthly low (Step 6)"]].map(([v,l])=>(
                 <button key={v} onClick={()=>setPriceBasis(v)} className={`px-3 py-2 rounded-lg text-sm border transition-all ${priceBasis===v?"bg-ottrd-accent/20 border-ottrd-accent text-ottrd-accent":"border-ottrd-border text-ottrd-muted hover:text-ottrd-text"}`}>{l}</button>
               ))}
             </div>
@@ -348,11 +371,12 @@ export default function Home() {
                 ))}
               </div>
             )}
-            <p className="text-ottrd-muted/50 text-xs mt-3">Tip: "Min of selected" is the most conservative - uses the lowest price across your chosen windows.</p>
+            <p className="text-ottrd-muted/50 text-xs mt-3">Tip: \u201CMin of selected\u201D is the most conservative \u2014 uses the lowest price across your chosen windows.</p>
           </Sec>
 
-          <Sec title="Step 5 - Peak sales months and order qty" d="0.4s">
-            <p className="text-ottrd-muted text-sm mb-3">Include only these months when calculating peak sales and suggested order qty:</p>
+          {/* Step 5 */}
+          <Sec title="Step 5 \u2014 Peak sales months & order qty" d="0.4s">
+            <p className="text-ottrd-muted text-sm mb-3">Include only these months when calculating peak sales & suggested order qty:</p>
             <div className="flex flex-wrap gap-2 mb-4">
               {MONTH_NAMES.map(m=>(<button key={m} onClick={()=>setMonthFilters(prev=>({...prev,[m]:!prev[m]}))} className={`w-12 py-2 rounded-lg text-xs font-medium border transition-all ${monthFilters[m]?"bg-ottrd-accent/20 border-ottrd-accent text-ottrd-accent":"border-ottrd-border text-ottrd-muted hover:text-ottrd-text"}`}>{m}</button>))}
             </div>
@@ -363,7 +387,7 @@ export default function Home() {
               <h3 className="text-sm font-medium text-ottrd-text mb-3">Order quantity basis</h3>
               <div className="flex flex-wrap items-center gap-4">
                 <label className="flex items-center gap-2 text-sm text-ottrd-muted cursor-pointer"><input type="radio" name="ob" checked={orderBasis==="peak"} onChange={()=>setOrderBasis("peak")} className="accent-blue-500"/>Peak of selected</label>
-                <label className="flex items-center gap-2 text-sm text-ottrd-muted cursor-pointer"><input type="radio" name="ob" checked={orderBasis==="avg"} onChange={()=>setOrderBasis("avg")} className="accent-blue-500"/>{"Average x"}</label>
+                <label className="flex items-center gap-2 text-sm text-ottrd-muted cursor-pointer"><input type="radio" name="ob" checked={orderBasis==="avg"} onChange={()=>setOrderBasis("avg")} className="accent-blue-500"/>Average \u00D7</label>
                 <div className="flex items-center gap-1">
                   <input type="number" value={orderPct} onChange={e=>setOrderPct(Number(e.target.value))} disabled={orderBasis!=="avg"} className="w-16 bg-ottrd-bg border border-ottrd-border rounded px-2 py-1 text-sm text-ottrd-text text-center disabled:opacity-40"/>
                   <span className="text-ottrd-muted text-sm">%</span>
@@ -376,7 +400,8 @@ export default function Home() {
             </div>
           </Sec>
 
-          <Sec title="Step 6 - Monthly price history (optional)" d="0.5s">
+          {/* Step 6 */}
+          <Sec title="Step 6 \u2014 Monthly price history (optional)" d="0.5s">
             <p className="text-ottrd-muted text-sm mb-3">Select months to analyse: avg price, lowest price, and days at lowest price.</p>
             <div className="grid grid-cols-3 md:grid-cols-6 gap-2 mb-4">
               {phOptions.map(o=>(<button key={o.key} onClick={()=>setPhSelected(prev=>({...prev,[o.key]:!prev[o.key]}))} className={`py-2 rounded-lg text-xs font-medium border transition-all ${phSelected[o.key]?"bg-ottrd-accent/20 border-ottrd-accent text-ottrd-accent":"border-ottrd-border text-ottrd-muted hover:text-ottrd-text"}`}>{o.label}</button>))}
@@ -391,18 +416,20 @@ export default function Home() {
                 <input type="checkbox" checked={useMonthlyLow} onChange={e=>setUseMonthlyLow(e.target.checked)} className="accent-blue-500"/>
                 Also use lowest price across selected months as an additional ROI price basis option
               </label>
-              <p className="text-ottrd-muted/50 text-xs mt-2 pl-5">When checked, "Monthly Low" will appear as a price basis choice and can be included in min-of-selected calculation.</p>
+              <p className="text-ottrd-muted/50 text-xs mt-2 pl-5">When checked, \u201CMonthly Low\u201D will appear as a price basis choice and can be included in min-of-selected calculation.</p>
             </div>
           </Sec>
 
+          {/* Run */}
           <div className="text-center mt-4">
             <button onClick={runAnalysis} disabled={running} className="px-12 py-4 bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-500 hover:to-blue-600 text-white font-display text-lg rounded-xl shadow-lg shadow-blue-500/20 transition-all disabled:opacity-50 disabled:cursor-not-allowed hover:shadow-blue-500/30 hover:scale-[1.02] active:scale-[0.98]">
-              {running ? "Analyzing..." : "Run Analysis"}
+              {running ? "Analyzing..." : "\u25B6  Run Analysis"}
             </button>
           </div>
         </main>
       )}
 
+      {/* ═══ ANALYSIS ═══ */}
       {view === "analysis" && (
         <main className="max-w-5xl mx-auto px-6 py-10 animate-fade-in">
           <h2 className="font-display text-2xl text-ottrd-text mb-6">Analysis Running</h2>
@@ -412,16 +439,17 @@ export default function Home() {
           </div>
           <div ref={logRef} className="log-console rounded-xl border border-ottrd-border p-4 h-96 overflow-y-auto">
             {logs.map((l,i)=>(<div key={i} className={`log-line-${l.type||"default"}`}>{l.message}</div>))}
-            {running&&<div className="animate-pulse-soft text-ottrd-accent mt-2">Processing...</div>}
+            {running&&<div className="animate-pulse-soft text-ottrd-accent mt-2">\u25CF Processing...</div>}
           </div>
         </main>
       )}
 
+      {/* ═══ RESULTS ═══ */}
       {view === "results" && (
         <main className="max-w-[110rem] mx-auto px-6 py-10 animate-fade-in">
           <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
             <h2 className="font-display text-2xl text-ottrd-text">Analysis Results</h2>
-            <button onClick={exportExcel} className="px-6 py-2.5 bg-ottrd-green/20 text-ottrd-green border border-ottrd-green/30 rounded-lg text-sm font-medium hover:bg-ottrd-green/30 transition-colors">Export Excel</button>
+            <button onClick={exportExcel} className="px-6 py-2.5 bg-ottrd-green/20 text-ottrd-green border border-ottrd-green/30 rounded-lg text-sm font-medium hover:bg-ottrd-green/30 transition-colors">\uD83D\uDCBE Export Excel \u2193</button>
           </div>
 
           <div className="grid grid-cols-3 md:grid-cols-6 gap-3 mb-6">
@@ -454,7 +482,7 @@ export default function Home() {
                   <th className="px-3 py-3 text-center">Fee Src</th>
                   <th className="px-3 py-3 text-right">Net Profit</th>
                   <th className="px-3 py-3 text-right">ROI %</th>
-                  <th className="px-3 py-3 text-center">{`Ever ${threshold}+`}</th>
+                  <th className="px-3 py-3 text-center">Ever {threshold}+</th>
                   <th className="px-3 py-3 text-right">Peak</th>
                   <th className="px-3 py-3 text-right">Avg</th>
                   <th className="px-3 py-3 text-right">Sug. Qty</th>
@@ -472,7 +500,7 @@ export default function Home() {
                     <tr key={i} className={`text-sm ${r.lowProfit?"bg-orange-900/15":r.decision==="Buy"?"bg-green-900/10":r.decision==="Review"?"bg-yellow-900/5":""}`}>
                       <td className="px-3 py-2.5 max-w-[250px] truncate text-ottrd-text" title={r.title}>{r.title}</td>
                       <td className="px-3 py-2.5 font-mono text-xs text-ottrd-muted">{r.upc}</td>
-                      <td className="px-3 py-2.5 font-mono text-xs">{r.asin?<a href={`https://amazon.com/dp/${r.asin}`} target="_blank" rel="noopener" className="text-ottrd-accent hover:underline">{r.asin}</a>:"—"}</td>
+                      <td className="px-3 py-2.5 font-mono text-xs">{r.asin?<a href={`https://amazon.com/dp/${r.asin}`} target="_blank" rel="noopener" className="text-ottrd-accent hover:underline">{r.asin}</a>:"\u2014"}</td>
                       <td className="px-3 py-2.5 text-right font-mono text-blue-400">{fmtDollars(r.cost)}</td>
                       <td className="px-3 py-2.5 text-right font-mono text-amber-700">{fmtDollars(r.trueCost)}</td>
                       <td className="px-3 py-2.5 text-right font-mono">{fmtDollars(r.amzPrice)}</td>
@@ -481,13 +509,13 @@ export default function Home() {
                       <td className="px-3 py-2.5 text-center text-xs"><span className={r.feeSource==="Keepa"?"text-green-400":"text-amber-500"}>{r.feeSource}</span></td>
                       <td className={`px-3 py-2.5 text-right font-mono font-semibold ${r.netProfit!=null?(r.netProfit>0?"text-green-400":"text-red-400"):"text-ottrd-muted"}`}>{fmtDollars(r.netProfit)}</td>
                       <td className={`px-3 py-2.5 text-right font-mono font-semibold ${r.roi!=null?(r.roi>=30?"text-green-400":r.roi>=15?"text-amber-400":"text-red-400"):"text-ottrd-muted"}`}>{fmtPct(r.roi)}</td>
-                      <td className="px-3 py-2.5 text-center"><span className={`text-xs font-bold ${eH?"text-green-400":"text-red-400"}`}>{eH?"YES":"NO"}</span></td>
-                      <td className="px-3 py-2.5 text-right font-mono text-ottrd-muted">{r.peakFiltered||"—"}</td>
-                      <td className="px-3 py-2.5 text-right font-mono text-ottrd-muted">{r.avgFiltered?r.avgFiltered.toFixed(1):"—"}</td>
-                      <td className="px-3 py-2.5 text-right font-mono font-semibold text-green-400">{r.suggestedQty||"—"}</td>
+                      <td className="px-3 py-2.5 text-center"><span className={`text-xs font-bold ${eH?"text-green-400":"text-red-400"}`}>{eH?"YES \u2713":"NO \u2717"}</span></td>
+                      <td className="px-3 py-2.5 text-right font-mono text-ottrd-muted">{r.peakFiltered||"\u2014"}</td>
+                      <td className="px-3 py-2.5 text-right font-mono text-ottrd-muted">{r.avgFiltered?r.avgFiltered.toFixed(1):"\u2014"}</td>
+                      <td className="px-3 py-2.5 text-right font-mono font-semibold text-green-400">{r.suggestedQty||"\u2014"}</td>
                       <td className="px-3 py-2.5 text-right font-mono text-blue-400">{fmtDollars(r.targetSupplier)}</td>
-                      <td className={`px-3 py-2.5 text-xs whitespace-nowrap ${r.priceGap!=null?(r.priceGap<=0?"text-green-400":"text-amber-400"):"text-ottrd-muted"}`}>{r.priceGap!=null?(r.priceGap<=0?"On target":`$${r.priceGap.toFixed(2)} off`):"—"}</td>
-                      <td className={`px-3 py-2.5 text-xs whitespace-nowrap ${r.pctOffNeeded!=null?(r.pctOffNeeded<=0?"text-green-400":r.pctOffNeeded<=10?"text-amber-400":"text-red-400"):"text-ottrd-muted"}`}>{r.pctOffNeeded!=null?(r.pctOffNeeded<=0?"On target":`${r.pctOffNeeded.toFixed(1)}%`):"—"}</td>
+                      <td className={`px-3 py-2.5 text-xs whitespace-nowrap ${r.priceGap!=null?(r.priceGap<=0?"text-green-400":"text-amber-400"):"text-ottrd-muted"}`}>{r.priceGap!=null?(r.priceGap<=0?"\u2713 On target":`$${r.priceGap.toFixed(2)} off`):"\u2014"}</td>
+                      <td className={`px-3 py-2.5 text-xs whitespace-nowrap ${r.pctOffNeeded!=null?(r.pctOffNeeded<=0?"text-green-400":r.pctOffNeeded<=10?"text-amber-400":"text-red-400"):"text-ottrd-muted"}`}>{r.pctOffNeeded!=null?(r.pctOffNeeded<=0?"\u2713 On target":`${r.pctOffNeeded.toFixed(1)}%`):"\u2014"}</td>
                       <td className="px-3 py-2.5 text-center"><span className={`inline-block px-2.5 py-1 rounded-full text-xs font-medium badge-${r.decision.toLowerCase()}`}>{r.decision}</span></td>
                       {mk.map(m=>{const v=(r.monthly||{})[m];return(<td key={m} className={`px-2 py-2.5 text-center font-mono text-xs ${v!=null&&v>=threshold?"text-green-400 font-bold bg-green-900/20":v!=null&&v>0?"text-yellow-300":"text-ottrd-muted/30"}`}>{v!=null?v:""}</td>);})}
                     </tr>
@@ -499,10 +527,12 @@ export default function Home() {
         </main>
       )}
 
-      <footer className="border-t border-ottrd-border mt-20 py-6 text-center text-ottrd-muted/40 text-xs">Ottrd - Amazon Deal Underwriting</footer>
+      <footer className="border-t border-ottrd-border mt-20 py-6 text-center text-ottrd-muted/40 text-xs">Ottrd \u00B7 Amazon Deal Underwriting</footer>
     </div>
   );
 }
+
+// ── Sub-components ───────────────────────────────────────────────────────────
 
 function Sec({title,d,children}){return(<section className="mb-8 bg-ottrd-surface border border-ottrd-border rounded-xl p-6 animate-slide-up" style={{animationDelay:d}}><h2 className="font-display text-lg text-ottrd-text mb-4">{title}</h2>{children}</section>);}
 
