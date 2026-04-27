@@ -2,10 +2,16 @@ import { getServerSession } from "next-auth";
 import Stripe from "stripe";
 import { supabase, PLANS } from "../../../lib/db";
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+function getStripe() {
+  if (!process.env.STRIPE_SECRET_KEY) return null;
+  return new Stripe(process.env.STRIPE_SECRET_KEY);
+}
 
 export async function POST(request) {
   try {
+    const stripe = getStripe();
+    if (!stripe) return Response.json({ error: "Stripe not configured" }, { status: 500 });
+
     const session = await getServerSession();
     if (!session?.user?.email) {
       return Response.json({ error: "Not authenticated" }, { status: 401 });
@@ -26,7 +32,6 @@ export async function POST(request) {
       return Response.json({ error: "Price not configured" }, { status: 500 });
     }
 
-    // Get or create Stripe customer
     const { data: dbUser } = await supabase
       .from("users")
       .select("id, stripe_customer_id")
@@ -49,7 +54,6 @@ export async function POST(request) {
         .eq("id", dbUser.id);
     }
 
-    // Create checkout session
     const checkoutSession = await stripe.checkout.sessions.create({
       customer: customerId,
       mode: "subscription",
@@ -57,17 +61,8 @@ export async function POST(request) {
       line_items: [{ price: priceId, quantity: 1 }],
       success_url: `${process.env.NEXTAUTH_URL}/dashboard?checkout=success`,
       cancel_url: `${process.env.NEXTAUTH_URL}/pricing?checkout=canceled`,
-      metadata: {
-        userId: dbUser.id,
-        plan: plan,
-        interval: interval,
-      },
-      subscription_data: {
-        metadata: {
-          userId: dbUser.id,
-          plan: plan,
-        },
-      },
+      metadata: { userId: dbUser.id, plan: plan, interval: interval },
+      subscription_data: { metadata: { userId: dbUser.id, plan: plan } },
     });
 
     return Response.json({ url: checkoutSession.url });
