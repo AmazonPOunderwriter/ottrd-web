@@ -1,4 +1,6 @@
 import { fetchKeepaBatch, analyzeItem, notFoundResult } from "../../../lib/keepa";
+import { getServerSession } from "next-auth";
+import { supabase, canRunAnalysis, recordUsage, getUserPlan } from "../../../lib/db";
 
 export const maxDuration = 300; // 5 min max for Vercel Pro
 
@@ -11,18 +13,50 @@ export async function POST(request) {
       }
 
       try {
-        const body = await request.json();
-        const { items, apiKey, settings } = body;
-
-        if (!apiKey) {
-          send("error", { message: "Missing Keepa API key" });
+        // Auth check
+        const session = await getServerSession();
+        if (!session?.user?.email) {
+          send("error", { message: "Please sign in to run an analysis." });
           controller.close();
           return;
         }
+
+        // Get user from DB
+        let userId = null;
+        if (supabase) {
+          const { data: dbUser } = await supabase
+            .from("users")
+            .select("id")
+            .eq("email", session.user.email)
+            .single();
+          userId = dbUser?.id;
+        }
+
+        const body = await request.json();
+        const { items, settings } = body;
+
+        // Use server-side Keepa key
+        const apiKey = process.env.KEEPA_API_KEY;
+        if (!apiKey) {
+          send("error", { message: "Keepa API key not configured on server." });
+          controller.close();
+          return;
+        }
+
         if (!items || !items.length) {
           send("error", { message: "No items to analyze" });
           controller.close();
           return;
+        }
+
+        // Check usage limits
+        if (userId && supabase) {
+          const check = await canRunAnalysis(userId, items.length);
+          if (!check.allowed) {
+            send("error", { message: check.reason });
+            controller.close();
+            return;
+          }
         }
 
         const {
@@ -144,6 +178,22 @@ export async function POST(request) {
 
         send("progress", { pct: 100, message: "Analysis complete!" });
         send("results", { results: allResults, monthKeys: (await import("../../../lib/keepa.js")).last12Months() });
+
+        // Record usage
+        if (userId && supabase) {
+          await recordUsage(userId, total);
+          // Save analysis metadata
+          await supabase.from("analyses").insert({
+            user_id: userId,
+            file_name: settings.fileName || "Untitled",
+            total_skus: allResults.length,
+            buy_count: buys,
+            review_count: reviews,
+            pass_count: passes,
+            settings: { threshold, minRoi: settings.minRoi, overhead: settings.overhead },
+          });
+        }
+
         send("done", {});
 
       } catch (e) {

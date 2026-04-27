@@ -1,61 +1,69 @@
-# Ottrd — Amazon Deal Underwriting (Web Version)
+# Ottrd - Amazon Deal Underwriting (SaaS)
 
-Upload your supplier linesheet. We pull 12 months of Keepa data, calculate true ROI, and generate your purchase order — in minutes.
+Upload your supplier linesheet. We pull 12 months of Keepa data, calculate true ROI, and generate your purchase order.
 
-## Features
+## Architecture
 
-- **Real Keepa sales data** — 12 months of monthly sold history
-- **True cost with overhead** — adds your % markup for freight, prep, supplies
-- **Target buy price calculator** — shows the max you can pay to hit your ROI
-- **Multi-ASIN per UPC** — finds all ASINs linked to each barcode
-- **Buy/Review/Pass decisions** — color-coded recommendations
-- **Excel export** — full analysis, buy list, and summary sheets
-- **Runs in your browser** — no desktop app needed
+- **Next.js 14** - App Router, server-side API routes
+- **NextAuth.js** - Google OAuth authentication
+- **Supabase** - PostgreSQL database (users, usage tracking, analysis history)
+- **Stripe** - Subscription billing ($49 / $129 / $299 per month)
+- **Keepa API** - Server-side, single API key for all users
+- **Vercel** - Hosting with serverless functions
 
-## Deploy to Vercel
+## Setup Guide
 
-### Option 1: One-click deploy
+### 1. Supabase
 
-1. Push this folder to a new GitHub repo
-2. Go to [vercel.com/new](https://vercel.com/new)
-3. Import your repo
-4. Click **Deploy** — that's it!
+1. Create a project at [supabase.com](https://supabase.com)
+2. Go to SQL Editor and run the contents of `lib/schema.sql`
+3. Copy your Project URL and Service Role Key from Settings > API
 
-### Option 2: Vercel CLI
+### 2. Google OAuth
+
+1. Go to [console.cloud.google.com](https://console.cloud.google.com)
+2. Create a project, enable Google+ API
+3. Go to APIs & Services > Credentials > Create OAuth 2.0 Client ID
+4. Set authorized redirect URI to: `https://ottrd-web.vercel.app/api/auth/callback/google`
+5. Copy Client ID and Client Secret
+
+### 3. Stripe
+
+1. Create an account at [stripe.com](https://stripe.com)
+2. Create 3 Products with 2 prices each (monthly + annual):
+   - Starter: $49/mo, $529/yr
+   - Professional: $129/mo, $1393/yr
+   - Enterprise: $299/mo, $3229/yr
+3. Copy each Price ID (starts with `price_`)
+4. Set up webhook endpoint: `https://ottrd-web.vercel.app/api/webhook`
+   - Events: `checkout.session.completed`, `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.payment_failed`
+
+### 4. Environment Variables
+
+Copy `.env.example` to `.env.local` and fill in all values. On Vercel, add these in Settings > Environment Variables.
+
+### 5. Deploy
 
 ```bash
-npm install -g vercel
-cd ottrd
-vercel
+git add -A
+git commit -m "Add subscription system"
+git push
 ```
 
-### Important: Vercel Plan
+Vercel auto-deploys from GitHub.
 
-The free Vercel plan limits serverless functions to **10 seconds**.
-For large linesheets, you'll need **Vercel Pro** ($20/mo) which allows up to **300 seconds**.
+## Pages
 
-## Run Locally
+- `/` - Landing page (marketing)
+- `/pricing` - Plan comparison with Stripe checkout
+- `/auth` - Google sign-in
+- `/dashboard` - Usage stats, plan info, analysis history
+- `/analyze` - The analyzer tool (requires auth + active plan)
 
-```bash
-cd ottrd
-npm install
-npm run dev
-```
+## Pricing Tiers
 
-Open [http://localhost:3000](http://localhost:3000)
-
-## How It Works
-
-1. You upload a CSV or Excel file with UPC and Cost columns
-2. The app parses your file in the browser
-3. UPCs are sent to a serverless API route that calls the Keepa API
-4. Results stream back in real-time (server-sent events)
-5. You see live logs, progress, and results in the browser
-6. Export to Excel when done
-
-## Tech Stack
-
-- **Next.js 14** (App Router)
-- **Tailwind CSS** for styling
-- **Vercel Serverless Functions** for Keepa API calls
-- **SheetJS (xlsx)** for file parsing and Excel export
+| Plan | Monthly | Annual (10% off) | SKU Limit |
+|------|---------|-------------------|-----------|
+| Starter | $49/mo | $529/yr | 2,500/mo |
+| Professional | $129/mo | $1,393/yr | 15,000/mo |
+| Enterprise | $299/mo | $3,229/yr | 50,000/mo |
