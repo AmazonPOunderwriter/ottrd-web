@@ -219,14 +219,14 @@ export default function AnalyzePage() {
 
     const phH = []; for (const k of phKeys) phH.push(`${k} Avg $`, `${k} Low $`, `${k} Days@Low`);
     if (phKeys.length) phH.push("Monthly Low $");
-    const fH = ["SKU","UPC","ASIN","Product Name","Invoice Cost","True Cost (w/ OH%)","Current BB","30d Avg BB","90d Avg BB","180d Avg BB","365d Avg BB","Price Used for ROI","Ref Fee %","Ref $","P&P Fee","Fee Source","Total FBA","Net Sale","Net Profit","ROI %",`Ever ${threshold}+ in 12mo`,"Peak (All)","Peak (Selected)","Avg (Selected)","Sug Qty","Qty Basis","Target Buy","Gap to Target","% Off Needed","Decision"];
+    const fH = ["SKU","UPC","ASIN","Product Name","Invoice Cost","True Cost (w/ OH%)","Current BB","30d Avg BB","90d Avg BB","180d Avg BB","365d Avg BB","Price Used for ROI","Ref Fee %","Ref $","P&P Fee","Fee Source","Total FBA","Net Sale","Net Profit","ROI %",`Ever ${threshold}+ in 12mo`,"Peak (All)","Peak (Selected)","Avg (Selected)","Sug Qty","Qty Basis",];"Target Buy","Gap to Target","% Off Needed","Sellers (Avg Sel)","Current Sellers","FBA Count","FBM Count","Amazon On Listing (180d)","Amazon BB Win %","Top 3P BB Win %","Decision"
     const s1 = [[...fH, ...phH, ...mk]];
     for (const r of results) {
       const gap = r.priceGap;
       const gS = gap != null ? (gap <= 0 ? "On target" : `Need $${gap.toFixed(2)} lower`) : "—";
       const pS = r.pctOffNeeded != null ? (r.pctOffNeeded <= 0 ? "On target" : `${r.pctOffNeeded.toFixed(1)}% off needed`) : "—";
       const eH = Object.values(r.monthly||{}).some(v => v >= threshold);
-      const fV = [r.sku,r.upc,r.asin,r.title,r.cost,r.trueCost,r.priceCurrent,r.priceAvg30,r.priceAvg90,r.priceAvg180,r.priceAvg365,r.amzPrice,r.referralPct,r.referralFee,r.ppFee,r.feeSource,r.fbaFee,r.netSale,r.netProfit,r.roi,eH?"YES":"NO",r.peakAll||"",r.peakFiltered||"",r.avgFiltered||"",r.suggestedQty||"",r.qtyBasis,r.targetSupplier,gS,pS,r.decision];
+      const fV = [r.sku,r.upc,r.asin,r.title,r.cost,r.trueCost,r.priceCurrent,r.priceAvg30,r.priceAvg90,r.priceAvg180,r.priceAvg365,r.amzPrice,r.referralPct,r.referralFee,r.ppFee,r.feeSource,r.fbaFee,r.netSale,r.netProfit,r.roi,eH?"YES":"NO",r.peakAll||"",r.peakFiltered||"",r.avgFiltered||"",r.suggestedQty||"",r.qtyBasis,r.targetSupplier,gS,pS,r.avgSellersFiltered??"",r.currentSellers??"",r.fbaCount??"",r.fbmCount??"",r.amazonOnListing180d==null?"":(r.amazonOnListing180d?"YES":"NO"),r.amazonBbWinPct??"",r.topThirdPartyBbWinPct??"",r.decision];
       const pV = []; for (const k of phKeys) { const d=(r.monthlyPh||{})[k]; pV.push(d?d.avg:null,d?d.low:null,d?d.days_at_low:null); }
       if (phKeys.length) pV.push(r.monthlyLowPrice||null);
       s1.push([...fV,...pV,...mk.map(m=>(r.monthly||{})[m]??"")]);
@@ -462,6 +462,11 @@ export default function AnalyzePage() {
                   <th className="px-3 py-3 text-right">Target Buy</th>
                   <th className="px-3 py-3">Gap</th>
                   <th className="px-3 py-3">% Off</th>
+<th className="px-3 py-3 text-right">Sellers (Avg)</th>
+                  <th className="px-3 py-3 text-center">FBA / FBM</th>
+                  <th className="px-3 py-3 text-center">Amz 180d</th>
+                  <th className="px-3 py-3 text-right">Amz BB%</th>
+                  <th className="px-3 py-3 text-right">3P BB%</th>
                   <th className="px-3 py-3 text-center">Decision</th>
                   {mk.map(m=>(<th key={m} className="px-2 py-3 text-center text-[10px]">{m}</th>))}
                 </tr>
@@ -489,6 +494,11 @@ export default function AnalyzePage() {
                       <td className="px-3 py-2.5 text-right font-mono text-blue-400">{fmtDollars(r.targetSupplier)}</td>
                       <td className={`px-3 py-2.5 text-xs whitespace-nowrap ${r.priceGap!=null?(r.priceGap<=0?"text-green-400":"text-amber-400"):"text-ottrd-muted"}`}>{r.priceGap!=null?(r.priceGap<=0?"On target":`$${r.priceGap.toFixed(2)} off`):"—"}</td>
                       <td className={`px-3 py-2.5 text-xs whitespace-nowrap ${r.pctOffNeeded!=null?(r.pctOffNeeded<=0?"text-green-400":r.pctOffNeeded<=10?"text-amber-400":"text-red-400"):"text-ottrd-muted"}`}>{r.pctOffNeeded!=null?(r.pctOffNeeded<=0?"On target":`${r.pctOffNeeded.toFixed(1)}%`):"—"}</td>
+<td className="px-3 py-2.5 text-right font-mono text-ottrd-muted text-xs">{r.avgSellersFiltered != null ? r.avgSellersFiltered.toFixed(1) : (r.currentSellers != null ? r.currentSellers : "—")}</td>
+                      <td className="px-3 py-2.5 text-center font-mono text-xs text-ottrd-muted">{r.fbaCount != null ? `${r.fbaCount} / ${r.fbmCount}` : "—"}</td>
+                      <td className="px-3 py-2.5 text-center text-xs"><span className={r.amazonOnListing180d ? "text-red-400 font-bold" : "text-green-400"}>{r.amazonOnListing180d == null ? "—" : (r.amazonOnListing180d ? "YES" : "NO")}</span></td>
+                      <td className={`px-3 py-2.5 text-right font-mono text-xs ${r.amazonBbWinPct != null ? (r.amazonBbWinPct >= 20 ? "text-red-400" : r.amazonBbWinPct >= 5 ? "text-amber-400" : "text-green-400") : "text-ottrd-muted"}`}>{r.amazonBbWinPct != null ? `${r.amazonBbWinPct.toFixed(1)}%` : "—"}</td>
+                      <td className="px-3 py-2.5 text-right font-mono text-xs text-ottrd-muted">{r.topThirdPartyBbWinPct != null ? `${r.topThirdPartyBbWinPct.toFixed(1)}%` : "—"}</td>
                       <td className="px-3 py-2.5 text-center"><span className={`inline-block px-2.5 py-1 rounded-full text-xs font-medium badge-${r.decision.toLowerCase()}`}>{r.decision}</span></td>
                       {mk.map(m=>{const v=(r.monthly||{})[m];return(<td key={m} className={`px-2 py-2.5 text-center font-mono text-xs ${v!=null&&v>=threshold?"text-green-400 font-bold bg-green-900/20":v!=null&&v>0?"text-yellow-300":"text-ottrd-muted/30"}`}>{v!=null?v:""}</td>);})}
                     </tr>
