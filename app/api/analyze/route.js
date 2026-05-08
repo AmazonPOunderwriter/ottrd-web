@@ -1,14 +1,24 @@
-import { fetchKeepaBatch, analyzeItem, notFoundResult } from "../../../lib/keepa";
-import { supabase, canRunAnalysis, recordUsage } from "../../../lib/db";
+import { fetchKeepaBatch, analyzeItem, notFoundResult, last12Months } from "../../../lib/keepa";
 
 export const maxDuration = 300;
+
+const MAX_CODES_PER_BATCH = 95; // Keepa max is 100 codes; leave headroom for variants
+const CONCURRENCY = 5;          // 5 batches in flight at once
+const TOKEN_FLOOR = 50;         // Pause if Keepa tokens drop below this
+const TOKEN_PAUSE_MS = 8000;    // Wait 8s before resuming when tokens are low
 
 export async function POST(request) {
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
     async start(controller) {
+      let closed = false;
       function send(event, data) {
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ event, ...data })}\n\n`));
+        if (closed) return;
+        try {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ event, ...data })}\n\n`));
+        } catch {
+          closed = true;
+        }
       }
 
       try {
@@ -21,7 +31,6 @@ export async function POST(request) {
           controller.close();
           return;
         }
-
         if (!items || !items.length) {
           send("error", { message: "No items to analyze" });
           controller.close();
@@ -44,112 +53,131 @@ export async function POST(request) {
           minProfit, phTargetMonths, useMonthlyLow,
         };
 
-        const BATCH = 50;
         const total = items.length;
+        // Build batches by Keepa code count, not item count: each item may
+        // generate 1-2 UPC variants, and Keepa caps `code` param at 100.
         const batches = [];
-        for (let i = 0; i < total; i += BATCH) {
-          batches.push(items.slice(i, i + BATCH));
+        {
+          let cur = [];
+          let curCodes = 0;
+          for (const item of items) {
+            const variantCount = (item.variants && item.variants.length) || 1;
+            if (cur.length && curCodes + variantCount > MAX_CODES_PER_BATCH) {
+              batches.push({ idx: batches.length, items: cur });
+              cur = [];
+              curCodes = 0;
+            }
+            cur.push(item);
+            curCodes += variantCount;
+          }
+          if (cur.length) batches.push({ idx: batches.length, items: cur });
         }
 
-        send("log", { message: `${total} SKUs split into ${batches.length} batches of ${BATCH}`, type: "info" });
-        send("progress", { pct: 5, message: `Starting analysis of ${total} SKUs...` });
+        send("log", { message: `${total} SKUs split into ${batches.length} batches (${CONCURRENCY} concurrent, max ${MAX_CODES_PER_BATCH} codes/batch)`, type: "info" });
+        send("progress", { pct: 2, message: `Starting analysis of ${total} SKUs...` });
+        // Tell the client we're using streaming results so it can prep the table early
+        send("stream-start", { total, monthKeys: last12Months() });
 
-        const allResults = [];
-        let doneCount = 0;
+        let doneItems = 0;
+        let lastTokensLeft = null;
 
-        for (let batchIdx = 0; batchIdx < batches.length; batchIdx++) {
-          const batch = batches[batchIdx];
+        // Process a single batch: fetch from Keepa, analyze, emit chunk.
+        async function processBatch(batch) {
+          const tag = `B${batch.idx + 1}/${batches.length}`;
 
+          // Backpressure: if we're near the token floor, hold off briefly.
+          if (lastTokensLeft != null && lastTokensLeft < TOKEN_FLOOR) {
+            send("log", { message: `   ${tag} waiting for Keepa tokens to refill (${lastTokensLeft} left)...`, type: "warning" });
+            await new Promise(r => setTimeout(r, TOKEN_PAUSE_MS));
+          }
+
+          const allCodes = [];
+          for (const item of batch.items) {
+            allCodes.push(...(item.variants || [item.upc]));
+          }
+          const uniqueCodes = [...new Set(allCodes)];
+
+          let keepaData = {};
           try {
-            const allCodes = [];
-            for (const item of batch) {
-              allCodes.push(...(item.variants || [item.upc]));
+            const resp = await fetchKeepaBatch(uniqueCodes, apiKey);
+            keepaData = resp.data;
+            if (resp.tokensLeft !== undefined) {
+              lastTokensLeft = resp.tokensLeft;
+              send("log", { message: `   ${tag} done — Keepa tokens left: ${resp.tokensLeft}`, type: "info" });
             }
-            const uniqueCodes = [...new Set(allCodes)];
+          } catch (e) {
+            send("log", { message: `   ${tag} failed: ${e.message}`, type: "error" });
+            // Treat the whole batch as not-found so the user still sees rows
+            const notFound = batch.items.map(it => notFoundResult(it, analysisSettings.overhead));
+            send("results-chunk", { results: notFound });
+            doneItems += batch.items.length;
+            const pct = Math.min(98, Math.round((doneItems / total) * 95) + 2);
+            send("progress", { pct, message: `Analyzed ${doneItems} of ${total} SKUs...` });
+            return;
+          }
 
-            send("log", { message: `   Batch ${batchIdx + 1}/${batches.length}: querying ${uniqueCodes.length} codes...` });
-
-            const { data: keepaData, tokensLeft } = await fetchKeepaBatch(uniqueCodes, apiKey);
-
-            if (tokensLeft !== undefined) {
-              send("log", { message: `   Keepa tokens remaining: ${tokensLeft}`, type: "info" });
-            }
-
-            let batchFound = 0;
-            for (const item of batch) {
-              const allProds = [];
-              const seenAsins = new Set();
-              for (const v of (item.variants || [item.upc])) {
-                for (const p of (keepaData[v] || [])) {
-                  const asinKey = p.asin || "";
-                  if (asinKey && !seenAsins.has(asinKey)) {
-                    seenAsins.add(asinKey);
-                    allProds.push(p);
-                  }
+          const chunkResults = [];
+          let foundInBatch = 0;
+          for (const item of batch.items) {
+            const seenAsins = new Set();
+            const allProds = [];
+            for (const v of (item.variants || [item.upc])) {
+              for (const p of (keepaData[v] || [])) {
+                const asinKey = p.asin || "";
+                if (asinKey && !seenAsins.has(asinKey)) {
+                  seenAsins.add(asinKey);
+                  allProds.push(p);
                 }
               }
-
-              if (!allProds.length) {
-                allResults.push(notFoundResult(item, analysisSettings.overhead));
-                continue;
-              }
-
-              for (const prod of allProds) {
-                const result = analyzeItem(item, prod, analysisSettings);
-                allResults.push(result);
-                batchFound++;
-
-                const emoji = result.decision === "Buy" ? "BUY" : result.decision === "Review" ? "REV" : "PASS";
-                const roiStr = result.roi != null ? `${result.roi.toFixed(1)}%` : "-";
-                send("log", {
-                  message: `   [${emoji}]  ${result.title.slice(0, 35).padEnd(35)}  Avg:${result.avgFiltered.toFixed(0).padStart(5)}  Peak:${String(result.peakFiltered).padStart(4)}  ROI:${roiStr}`,
-                  type: result.decision === "Buy" ? "success" : result.decision === "Review" ? "warning" : "default",
-                });
-              }
             }
-
-            doneCount += batch.length;
-            const pct = Math.round((doneCount / total) * 90) + 5;
-            send("progress", { pct, message: `Analyzed ${doneCount} of ${total} SKUs...` });
-            send("log", {
-              message: `   Batch ${batchIdx + 1}/${batches.length} done - ${batchFound}/${batch.length} found`,
-              type: "success",
-            });
-
-          } catch (e) {
-            send("log", { message: `   Batch ${batchIdx + 1} failed: ${e.message}`, type: "error" });
-            for (const item of batch) {
-              allResults.push(notFoundResult(item, analysisSettings.overhead));
+            if (!allProds.length) {
+              chunkResults.push(notFoundResult(item, analysisSettings.overhead));
+              continue;
             }
-            doneCount += batch.length;
+            for (const prod of allProds) {
+              const result = analyzeItem(item, prod, analysisSettings);
+              chunkResults.push(result);
+              foundInBatch++;
+            }
           }
+
+          // Emit this chunk to the UI immediately
+          send("results-chunk", { results: chunkResults });
+
+          doneItems += batch.items.length;
+          const pct = Math.min(98, Math.round((doneItems / total) * 95) + 2);
+          send("progress", { pct, message: `Analyzed ${doneItems} of ${total} SKUs...` });
+          send("log", {
+            message: `   ${tag} ${foundInBatch}/${batch.items.length} found`,
+            type: "success",
+          });
         }
 
-        const buys = allResults.filter(r => r.decision === "Buy").length;
-        const reviews = allResults.filter(r => r.decision === "Review").length;
-        const passes = allResults.filter(r => r.decision === "Pass").length;
-        const notFound = allResults.filter(r => !r.found).length;
-        const everHit = allResults.filter(r => Object.values(r.monthly || {}).some(v => v >= threshold)).length;
+        // Run batches with bounded concurrency (worker-pool pattern).
+        let cursor = 0;
+        async function worker() {
+          while (true) {
+            const myIdx = cursor++;
+            if (myIdx >= batches.length) return;
+            await processBatch(batches[myIdx]);
+          }
+        }
+        const workers = [];
+        for (let i = 0; i < Math.min(CONCURRENCY, batches.length); i++) {
+          workers.push(worker());
+        }
+        await Promise.all(workers);
 
-        send("log", { message: "\n" + "-".repeat(60) });
-        send("log", { message: "  ANALYSIS COMPLETE", type: "info" });
-        send("log", { message: "-".repeat(60) });
-        send("log", { message: `  Total SKUs          : ${allResults.length}` });
-        send("log", { message: `  Ever hit ${threshold}+/month  : ${everHit}`, type: "success" });
-        send("log", { message: `  Buy                 : ${buys}`, type: "success" });
-        send("log", { message: `  Review              : ${reviews}`, type: "warning" });
-        send("log", { message: `  Pass                : ${passes}` });
-        send("log", { message: `  Not found in Keepa  : ${notFound}` });
-        send("log", { message: "-".repeat(60) });
-
+        send("log", { message: "—".repeat(40) });
+        send("log", { message: `  Analysis complete — ${total} SKUs processed`, type: "success" });
         send("progress", { pct: 100, message: "Analysis complete!" });
-        send("results", { results: allResults, monthKeys: (await import("../../../lib/keepa.js")).last12Months() });
         send("done", {});
 
       } catch (e) {
         send("error", { message: e.message });
       } finally {
-        controller.close();
+        closed = true;
+        try { controller.close(); } catch {}
       }
     },
   });

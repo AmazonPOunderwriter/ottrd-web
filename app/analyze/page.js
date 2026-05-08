@@ -2,6 +2,7 @@
 
 import { useState, useRef, useCallback, useEffect } from "react";
 import * as XLSX from "xlsx";
+import ExcelJS from "exceljs";
 
 function cleanUpc(val) {
   let s = String(val).trim();
@@ -198,7 +199,9 @@ export default function AnalyzePage() {
             const p = JSON.parse(line.slice(6));
             if (p.event === "log") setLogs(prev => [...prev, { message: p.message, type: p.type || "default" }]);
             else if (p.event === "progress") { setProgress(p.pct); setProgressMsg(p.message); }
-            else if (p.event === "results") { setResults(p.results); setMonthKeys(p.monthKeys); setView("results"); }
+            else if (p.event === "stream-start") { setResults([]); setMonthKeys(p.monthKeys); setView("results"); }
+            else if (p.event === "results-chunk") setResults(prev => [...prev, ...p.results]);
+            else if (p.event === "done") { setProgress(100); setProgressMsg("Done"); }
             else if (p.event === "error") setLogs(prev => [...prev, { message: p.message, type: "error" }]);
           } catch {}
         }
@@ -209,7 +212,7 @@ export default function AnalyzePage() {
     setRunning(false);
   };
 
-  const exportExcel = () => {
+  const exportExcel = async () => {
     if (!results.length) return;
     const mk = monthKeys.length ? monthKeys : last12Months();
 
@@ -217,55 +220,380 @@ export default function AnalyzePage() {
     for (const r of results) for (const k of Object.keys(r.monthlyPh || {})) phKeysSet.add(k);
     const phKeys = [...phKeysSet].sort();
 
-    const phH = []; for (const k of phKeys) phH.push(`${k} Avg $`, `${k} Low $`, `${k} Days@Low`);
-    if (phKeys.length) phH.push("Monthly Low $");
-    const fH = ["SKU","UPC","ASIN","Product Name","Invoice Cost","True Cost (w/ OH%)","Current BB","30d Avg BB","90d Avg BB","180d Avg BB","365d Avg BB","Price Used for ROI","Ref Fee %","Ref $","P&P Fee","Fee Source","Total FBA","Net Sale","Net Profit","ROI %",`Ever ${threshold}+ in 12mo`,"Peak (All)","Peak (Selected)","Avg (Selected)","Sug Qty","Qty Basis",];"Target Buy","Gap to Target","% Off Needed","Sellers (Avg Sel)","Current Sellers","FBA Count","FBM Count","Amazon On Listing (180d)","Amazon BB Win %","Top 3P BB Win %","Decision"
-    const s1 = [[...fH, ...phH, ...mk]];
+    const wb = new ExcelJS.Workbook();
+    wb.creator = "Ottrd";
+    wb.created = new Date();
+
+    const C = {
+      headerFill: "FF1E3A8A",
+      headerText: "FFFFFFFF",
+      bandFill:   "FFF8FAFC",
+      border:     "FFE2E8F0",
+      roiHigh:    "FFD1FAE5",
+      roiMid:     "FFFEF3C7",
+      roiLow:     "FFFEE2E2",
+      decBuy:     "FF86EFAC",
+      decReview:  "FFFDE68A",
+      decPass:    "FFE5E7EB",
+      decNotFound:"FFFCA5A5",
+      onTarget:   "FFD1FAE5",
+      offTarget:  "FFFEE2E2",
+    };
+
+    function styleHeader(row) {
+      row.eachCell((cell) => {
+        cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: C.headerFill } };
+        cell.font = { bold: true, color: { argb: C.headerText }, size: 11 };
+        cell.alignment = { vertical: "middle", horizontal: "center", wrapText: true };
+      });
+      row.height = 32;
+    }
+
+    const FMT = {
+      money:  '"$"#,##0.00;[Red]"-$"#,##0.00;"—"',
+      pct:    '0.0%;[Red]-0.0%;"—"',
+      int:    '#,##0;[Red]-#,##0;"—"',
+      intRaw: '#,##0',
+      text:   "@",
+    };
+
+    const pctVal = (v) => (v == null ? null : v / 100);
+
+    // ─── Sheet 1: Deal Analysis ───────────────────────────────────────────
+    const ws1 = wb.addWorksheet("Deal Analysis", {
+      views: [{ state: "frozen", xSplit: 4, ySplit: 1 }],
+    });
+
+    const phHeader = [];
+    for (const k of phKeys) phHeader.push(`${k} Avg`, `${k} Low`, `${k} Days@Low`);
+    if (phKeys.length) phHeader.push("Monthly Low");
+
+    const baseHeaders = [
+      "SKU", "UPC", "ASIN", "Product Name",
+      "Invoice Cost", "True Cost (w/ OH%)",
+      "Current BB", "30d Avg BB", "90d Avg BB", "180d Avg BB", "365d Avg BB",
+      "Price Used for ROI",
+      "Ref %", "Ref $", "P&P Fee", "Fee Source", "Total FBA",
+      "Net Sale", "Net Profit", "ROI",
+      `Ever ${threshold}+ in 12mo`, "Peak (All)", "Peak (Sel)", "Avg (Sel)",
+      "Sug Qty", "Qty Basis",
+      "Target Buy", "Gap", "% Off Needed",
+      "Sellers (Avg Sel)", "Current Sellers", "FBA", "FBM",
+      "Amz On Listing 180d", "Amz BB Win %", "Top 3P BB Win %",
+      "Decision",
+    ];
+
+    ws1.addRow([...baseHeaders, ...phHeader, ...mk]);
+    styleHeader(ws1.getRow(1));
+
+    const colSpecs = [
+      { width: 14, fmt: FMT.text },
+      { width: 14, fmt: FMT.text },
+      { width: 12, fmt: FMT.text },
+      { width: 42, fmt: FMT.text },
+      { width: 12, fmt: FMT.money },
+      { width: 12, fmt: FMT.money },
+      { width: 11, fmt: FMT.money },
+      { width: 11, fmt: FMT.money },
+      { width: 11, fmt: FMT.money },
+      { width: 11, fmt: FMT.money },
+      { width: 11, fmt: FMT.money },
+      { width: 12, fmt: FMT.money },
+      { width: 8,  fmt: FMT.pct  },
+      { width: 9,  fmt: FMT.money },
+      { width: 9,  fmt: FMT.money },
+      { width: 10, fmt: FMT.text },
+      { width: 10, fmt: FMT.money },
+      { width: 10, fmt: FMT.money },
+      { width: 11, fmt: FMT.money },
+      { width: 9,  fmt: FMT.pct  },
+      { width: 12, fmt: FMT.text },
+      { width: 9,  fmt: FMT.intRaw },
+      { width: 9,  fmt: FMT.intRaw },
+      { width: 9,  fmt: FMT.int    },
+      { width: 9,  fmt: FMT.intRaw },
+      { width: 16, fmt: FMT.text   },
+      { width: 11, fmt: FMT.money  },
+      { width: 16, fmt: FMT.text   },
+      { width: 16, fmt: FMT.text   },
+      { width: 10, fmt: FMT.int    },
+      { width: 10, fmt: FMT.intRaw },
+      { width: 7,  fmt: FMT.intRaw },
+      { width: 7,  fmt: FMT.intRaw },
+      { width: 12, fmt: FMT.text   },
+      { width: 11, fmt: FMT.pct    },
+      { width: 11, fmt: FMT.pct    },
+      { width: 11, fmt: FMT.text   },
+    ];
+    for (let i = 0; i < phKeys.length; i++) {
+      colSpecs.push({ width: 11, fmt: FMT.money });
+      colSpecs.push({ width: 11, fmt: FMT.money });
+      colSpecs.push({ width: 10, fmt: FMT.intRaw });
+    }
+    if (phKeys.length) colSpecs.push({ width: 11, fmt: FMT.money });
+    for (const _ of mk) colSpecs.push({ width: 8, fmt: FMT.intRaw });
+
+    colSpecs.forEach((spec, i) => {
+      const col = ws1.getColumn(i + 1);
+      col.width = spec.width;
+      col.numFmt = spec.fmt;
+    });
+
     for (const r of results) {
+      const eH = Object.values(r.monthly || {}).some((v) => v >= threshold);
       const gap = r.priceGap;
-      const gS = gap != null ? (gap <= 0 ? "On target" : `Need $${gap.toFixed(2)} lower`) : "—";
-      const pS = r.pctOffNeeded != null ? (r.pctOffNeeded <= 0 ? "On target" : `${r.pctOffNeeded.toFixed(1)}% off needed`) : "—";
-      const eH = Object.values(r.monthly||{}).some(v => v >= threshold);
-      const fV = [r.sku,r.upc,r.asin,r.title,r.cost,r.trueCost,r.priceCurrent,r.priceAvg30,r.priceAvg90,r.priceAvg180,r.priceAvg365,r.amzPrice,r.referralPct,r.referralFee,r.ppFee,r.feeSource,r.fbaFee,r.netSale,r.netProfit,r.roi,eH?"YES":"NO",r.peakAll||"",r.peakFiltered||"",r.avgFiltered||"",r.suggestedQty||"",r.qtyBasis,r.targetSupplier,gS,pS,r.avgSellersFiltered??"",r.currentSellers??"",r.fbaCount??"",r.fbmCount??"",r.amazonOnListing180d==null?"":(r.amazonOnListing180d?"YES":"NO"),r.amazonBbWinPct??"",r.topThirdPartyBbWinPct??"",r.decision];
-      const pV = []; for (const k of phKeys) { const d=(r.monthlyPh||{})[k]; pV.push(d?d.avg:null,d?d.low:null,d?d.days_at_low:null); }
-      if (phKeys.length) pV.push(r.monthlyLowPrice||null);
-      s1.push([...fV,...pV,...mk.map(m=>(r.monthly||{})[m]??"")]);
+      const gapStr = gap != null ? (gap <= 0 ? "On target" : `Need $${gap.toFixed(2)} lower`) : "—";
+      const pctStr = r.pctOffNeeded != null ? (r.pctOffNeeded <= 0 ? "On target" : `${r.pctOffNeeded.toFixed(1)}% off needed`) : "—";
+
+      const baseVals = [
+        r.sku || "", r.upc || "", r.asin || "", r.title || "",
+        r.cost ?? null, r.trueCost ?? null,
+        r.priceCurrent ?? null, r.priceAvg30 ?? null, r.priceAvg90 ?? null, r.priceAvg180 ?? null, r.priceAvg365 ?? null,
+        r.amzPrice ?? null,
+        pctVal(r.referralPct), r.referralFee ?? null, r.ppFee ?? null, r.feeSource || "—", r.fbaFee ?? null,
+        r.netSale ?? null, r.netProfit ?? null, pctVal(r.roi),
+        eH ? "YES" : "NO", r.peakAll || null, r.peakFiltered || null, r.avgFiltered || null,
+        r.suggestedQty || null, r.qtyBasis || "—",
+        r.targetSupplier ?? null, gapStr, pctStr,
+        r.avgSellersFiltered ?? null, r.currentSellers ?? null, r.fbaCount ?? null, r.fbmCount ?? null,
+        r.amazonOnListing180d == null ? "—" : (r.amazonOnListing180d ? "YES" : "NO"),
+        pctVal(r.amazonBbWinPct), pctVal(r.topThirdPartyBbWinPct),
+        r.decision,
+      ];
+
+      const phVals = [];
+      for (const k of phKeys) {
+        const d = (r.monthlyPh || {})[k];
+        phVals.push(d ? d.avg : null, d ? d.low : null, d ? d.days_at_low : null);
+      }
+      if (phKeys.length) phVals.push(r.monthlyLowPrice ?? null);
+
+      const monthVals = mk.map((m) => (r.monthly || {})[m] ?? null);
+
+      const row = ws1.addRow([...baseVals, ...phVals, ...monthVals]);
+
+      // ROI cell
+      const roiCell = row.getCell(20);
+      if (r.roi != null) {
+        let fillColor = null;
+        if (r.roi >= 30) fillColor = C.roiHigh;
+        else if (r.roi >= 15) fillColor = C.roiMid;
+        else fillColor = C.roiLow;
+        roiCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: fillColor } };
+        roiCell.font = { bold: true };
+      }
+
+      // Decision cell
+      const decCell = row.getCell(37);
+      let decColor = C.decPass;
+      if (r.decision === "Buy") decColor = C.decBuy;
+      else if (r.decision === "Review") decColor = C.decReview;
+      else if (!r.found) decColor = C.decNotFound;
+      decCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: decColor } };
+      decCell.font = { bold: true };
+      decCell.alignment = { horizontal: "center" };
+
+      row.getCell(21).alignment = { horizontal: "center" };
+      row.getCell(34).alignment = { horizontal: "center" };
+      row.getCell(16).alignment = { horizontal: "center" };
+
+      const everCell = row.getCell(21);
+      everCell.font = { bold: true, color: { argb: eH ? "FF15803D" : "FF991B1B" } };
+
+      const amzCell = row.getCell(34);
+      if (r.amazonOnListing180d) {
+        amzCell.font = { bold: true, color: { argb: "FF991B1B" } };
+      } else if (r.amazonOnListing180d === false) {
+        amzCell.font = { color: { argb: "FF15803D" } };
+      }
+
+      if (gap != null) {
+        const gapCell = row.getCell(28);
+        gapCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: gap <= 0 ? C.onTarget : C.offTarget } };
+      }
     }
-    const ws1 = XLSX.utils.aoa_to_sheet(s1);
 
-    const bR = results.filter(r => r.decision==="Buy"||r.decision==="Review");
-    const bH = ["SKU","UPC","ASIN","Product Name","Invoice Cost","True Cost","Amz Price","Net Profit","ROI %","Target Buy","Gap","% Off","Peak (Sel)","Avg (Sel)","Sug Qty","Qty Basis","Decision"];
-    const s2 = [bH,...bR.map(r => { const g=r.priceGap; return [r.sku,r.upc,r.asin,r.title,r.cost,r.trueCost,r.amzPrice,r.netProfit,r.roi,r.targetSupplier,g!=null?(g<=0?"On target":`Need $${g.toFixed(2)} lower`):"—",r.pctOffNeeded!=null?(r.pctOffNeeded<=0?"On target":`${r.pctOffNeeded.toFixed(1)}%`):"—",r.peakFiltered,r.avgFiltered,r.suggestedQty,r.qtyBasis,r.decision]; })];
-    const ws2 = XLSX.utils.aoa_to_sheet(s2);
+    ws1.autoFilter = {
+      from: { row: 1, column: 1 },
+      to:   { row: 1, column: ws1.columnCount },
+    };
 
-    const nB=results.filter(r=>r.decision==="Buy").length, nR=results.filter(r=>r.decision==="Review").length, nP=results.filter(r=>r.decision==="Pass").length, nN=results.filter(r=>!r.found).length;
-    const eC=results.filter(r=>Object.values(r.monthly||{}).some(v=>v>=threshold)).length;
-    const po=results.filter(r=>r.decision==="Buy"||r.decision==="Review");
-    const tC=po.reduce((s,r)=>s+(r.cost||0)*(r.suggestedQty||0),0);
-    const tP=po.reduce((s,r)=>s+(r.netProfit||0)*(r.suggestedQty||0),0);
-    const rs=po.filter(r=>r.roi!=null).map(r=>r.roi);
-    const aR=rs.length?rs.reduce((a,b)=>a+b,0)/rs.length:0;
-    const ws3 = XLSX.utils.aoa_to_sheet([["DEAL SUMMARY",""],["Generated",new Date().toISOString().split("T")[0]],["Threshold",`${threshold}+ sales in any month`],["",""],["Total SKUs analyzed",results.length],[`Ever hit ${threshold}+ in 12 months`,eC],["",""],["Buy decisions",nB],["Review decisions",nR],["Pass decisions",nP],["Not found in Keepa",nN],["",""],["Estimated total PO cost",`$${tC.toFixed(2)}`],["Estimated total profit",`$${tP.toFixed(2)}`],["Average ROI on buy items",`${aR.toFixed(1)}%`]]);
+    // ─── Sheet 2: Buy List ────────────────────────────────────────────────
+    const ws2 = wb.addWorksheet("Buy List", {
+      views: [{ state: "frozen", xSplit: 4, ySplit: 1 }],
+    });
+    const buyHeaders = [
+      "SKU", "UPC", "ASIN", "Product Name",
+      "Invoice Cost", "True Cost", "Amz Price",
+      "Net Profit", "ROI",
+      "Target Buy", "Gap", "% Off",
+      "Peak (Sel)", "Avg (Sel)", "Sug Qty", "Qty Basis",
+      "Decision",
+    ];
+    ws2.addRow(buyHeaders);
+    styleHeader(ws2.getRow(1));
+    const ws2Specs = [14, 14, 12, 42, 12, 12, 11, 11, 9, 11, 16, 14, 9, 9, 9, 16, 11];
+    const ws2Fmts = [
+      FMT.text, FMT.text, FMT.text, FMT.text,
+      FMT.money, FMT.money, FMT.money,
+      FMT.money, FMT.pct,
+      FMT.money, FMT.text, FMT.text,
+      FMT.intRaw, FMT.int, FMT.intRaw, FMT.text, FMT.text,
+    ];
+    ws2Specs.forEach((w, i) => { ws2.getColumn(i + 1).width = w; ws2.getColumn(i + 1).numFmt = ws2Fmts[i]; });
 
-    const tH = ["Product Name","UPC","ASIN","Quantity","Target Buy Price","% Off Needed","Min Profit Flag"];
-    const tR = results.filter(r=>(r.decision==="Buy"||r.decision==="Review")&&(r.suggestedQty||0)>0);
-    const s4 = [tH,...tR.map(r => { const g=r.priceGap; let pN=null; if(r.targetSupplier!=null&&r.cost>0) pN=g!=null&&g<=0?0:Math.round(((r.cost-r.targetSupplier)/r.cost)*1000)/10; return [r.title,r.upc,r.asin,r.suggestedQty,r.targetSupplier,pN,r.lowProfit?"Below min $":"OK"]; })];
-    const ws4 = XLSX.utils.aoa_to_sheet(s4);
+    const buyResults = results.filter(r => r.decision === "Buy" || r.decision === "Review");
+    for (const r of buyResults) {
+      const gap = r.priceGap;
+      const gapStr = gap != null ? (gap <= 0 ? "On target" : `Need $${gap.toFixed(2)} lower`) : "—";
+      const pctStr = r.pctOffNeeded != null ? (r.pctOffNeeded <= 0 ? "On target" : `${r.pctOffNeeded.toFixed(1)}%`) : "—";
+      const row = ws2.addRow([
+        r.sku || "", r.upc || "", r.asin || "", r.title || "",
+        r.cost ?? null, r.trueCost ?? null, r.amzPrice ?? null,
+        r.netProfit ?? null, pctVal(r.roi),
+        r.targetSupplier ?? null, gapStr, pctStr,
+        r.peakFiltered || null, r.avgFiltered || null, r.suggestedQty || null, r.qtyBasis || "—",
+        r.decision,
+      ]);
+      const roiCell = row.getCell(9);
+      if (r.roi != null) {
+        const fillColor = r.roi >= 30 ? C.roiHigh : r.roi >= 15 ? C.roiMid : C.roiLow;
+        roiCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: fillColor } };
+        roiCell.font = { bold: true };
+      }
+      const decCell = row.getCell(17);
+      decCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: r.decision === "Buy" ? C.decBuy : C.decReview } };
+      decCell.font = { bold: true };
+      decCell.alignment = { horizontal: "center" };
+    }
+    ws2.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: ws2.columnCount } };
 
-    let ws5 = null;
+    // ─── Sheet 3: Summary ─────────────────────────────────────────────────
+    const ws3 = wb.addWorksheet("Summary");
+    ws3.getColumn(1).width = 32;
+    ws3.getColumn(2).width = 20;
+
+    const nB = results.filter(r => r.decision === "Buy").length;
+    const nR = results.filter(r => r.decision === "Review").length;
+    const nP = results.filter(r => r.decision === "Pass").length;
+    const nN = results.filter(r => !r.found).length;
+    const eC = results.filter(r => Object.values(r.monthly || {}).some(v => v >= threshold)).length;
+    const po = results.filter(r => r.decision === "Buy" || r.decision === "Review");
+    const tC = po.reduce((s, r) => s + (r.cost || 0) * (r.suggestedQty || 0), 0);
+    const tP = po.reduce((s, r) => s + (r.netProfit || 0) * (r.suggestedQty || 0), 0);
+    const rs = po.filter(r => r.roi != null).map(r => r.roi);
+    const aR = rs.length ? rs.reduce((a, b) => a + b, 0) / rs.length : 0;
+
+    const titleRow = ws3.addRow(["DEAL SUMMARY", ""]);
+    titleRow.font = { bold: true, size: 16, color: { argb: C.headerFill } };
+    ws3.addRow(["Generated", new Date().toISOString().split("T")[0]]);
+    ws3.addRow(["Threshold", `${threshold}+ sales in any month`]);
+    ws3.addRow(["", ""]);
+    ws3.addRow(["Total SKUs analyzed", results.length]).getCell(2).numFmt = FMT.intRaw;
+    ws3.addRow([`Ever hit ${threshold}+ in 12 months`, eC]).getCell(2).numFmt = FMT.intRaw;
+    ws3.addRow(["", ""]);
+
+    const buyRow = ws3.addRow(["Buy decisions", nB]);
+    buyRow.getCell(2).numFmt = FMT.intRaw;
+    buyRow.getCell(2).fill = { type: "pattern", pattern: "solid", fgColor: { argb: C.decBuy } };
+    buyRow.getCell(2).font = { bold: true };
+
+    const revRow = ws3.addRow(["Review decisions", nR]);
+    revRow.getCell(2).numFmt = FMT.intRaw;
+    revRow.getCell(2).fill = { type: "pattern", pattern: "solid", fgColor: { argb: C.decReview } };
+    revRow.getCell(2).font = { bold: true };
+
+    const passRow = ws3.addRow(["Pass decisions", nP]);
+    passRow.getCell(2).numFmt = FMT.intRaw;
+    passRow.getCell(2).fill = { type: "pattern", pattern: "solid", fgColor: { argb: C.decPass } };
+
+    const nfRow = ws3.addRow(["Not found in Keepa", nN]);
+    nfRow.getCell(2).numFmt = FMT.intRaw;
+    nfRow.getCell(2).fill = { type: "pattern", pattern: "solid", fgColor: { argb: C.decNotFound } };
+
+    ws3.addRow(["", ""]);
+    ws3.addRow(["Estimated total PO cost", tC]).getCell(2).numFmt = FMT.money;
+    ws3.addRow(["Estimated total profit", tP]).getCell(2).numFmt = FMT.money;
+    ws3.addRow(["Average ROI on buy items", aR / 100]).getCell(2).numFmt = FMT.pct;
+
+    // ─── Sheet 4: Target PO ───────────────────────────────────────────────
+    const ws4 = wb.addWorksheet("Target PO", {
+      views: [{ state: "frozen", xSplit: 0, ySplit: 1 }],
+    });
+    const tHdr = ["Product Name", "UPC", "ASIN", "Quantity", "Target Buy Price", "% Off Needed", "Min Profit Flag"];
+    ws4.addRow(tHdr);
+    styleHeader(ws4.getRow(1));
+    const ws4Widths = [42, 14, 12, 10, 14, 14, 14];
+    ws4Widths.forEach((w, i) => { ws4.getColumn(i + 1).width = w; });
+    ws4.getColumn(4).numFmt = FMT.intRaw;
+    ws4.getColumn(5).numFmt = FMT.money;
+    ws4.getColumn(6).numFmt = FMT.pct;
+
+    const targetRows = results.filter(r => (r.decision === "Buy" || r.decision === "Review") && (r.suggestedQty || 0) > 0);
+    for (const r of targetRows) {
+      const g = r.priceGap;
+      let pN = null;
+      if (r.targetSupplier != null && r.cost > 0) {
+        pN = (g != null && g <= 0) ? 0 : Math.round(((r.cost - r.targetSupplier) / r.cost) * 1000) / 10;
+      }
+      const row = ws4.addRow([r.title, r.upc, r.asin, r.suggestedQty, r.targetSupplier, pctVal(pN), r.lowProfit ? "Below min $" : "OK"]);
+      if (r.lowProfit) {
+        row.getCell(7).fill = { type: "pattern", pattern: "solid", fgColor: { argb: C.roiLow } };
+        row.getCell(7).font = { bold: true, color: { argb: "FF991B1B" } };
+      }
+    }
+    ws4.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: ws4.columnCount } };
+
+    // ─── Sheet 5: Price History (only if data) ────────────────────────────
     if (phKeys.length) {
-      const pH = ["SKU","UPC","ASIN","Product Name"]; for (const k of phKeys) pH.push(`${k} Avg $`,`${k} Low $`,`${k} Days@Low`); pH.push("Overall Low $");
-      const s5 = [pH,...results.map(r => { const row=[r.sku,r.upc,r.asin,r.title]; const aL=[]; for(const k of phKeys){const d=(r.monthlyPh||{})[k];if(d){row.push(d.avg,d.low,d.days_at_low);if(d.low)aL.push(d.low);}else row.push(null,null,null);} row.push(aL.length?Math.round(Math.min(...aL)*100)/100:null); return row; })];
-      ws5 = XLSX.utils.aoa_to_sheet(s5);
+      const ws5 = wb.addWorksheet("Price History", {
+        views: [{ state: "frozen", xSplit: 4, ySplit: 1 }],
+      });
+      const phH = ["SKU", "UPC", "ASIN", "Product Name"];
+      for (const k of phKeys) phH.push(`${k} Avg`, `${k} Low`, `${k} Days@Low`);
+      phH.push("Overall Low");
+      ws5.addRow(phH);
+      styleHeader(ws5.getRow(1));
+
+      ws5.getColumn(1).width = 14;
+      ws5.getColumn(2).width = 14;
+      ws5.getColumn(3).width = 12;
+      ws5.getColumn(4).width = 42;
+      let cIdx = 5;
+      for (let i = 0; i < phKeys.length; i++) {
+        ws5.getColumn(cIdx).width = 11; ws5.getColumn(cIdx).numFmt = FMT.money; cIdx++;
+        ws5.getColumn(cIdx).width = 11; ws5.getColumn(cIdx).numFmt = FMT.money; cIdx++;
+        ws5.getColumn(cIdx).width = 10; ws5.getColumn(cIdx).numFmt = FMT.intRaw; cIdx++;
+      }
+      ws5.getColumn(cIdx).width = 11; ws5.getColumn(cIdx).numFmt = FMT.money;
+
+      for (const r of results) {
+        const row = [r.sku || "", r.upc || "", r.asin || "", r.title || ""];
+        const aL = [];
+        for (const k of phKeys) {
+          const d = (r.monthlyPh || {})[k];
+          if (d) {
+            row.push(d.avg, d.low, d.days_at_low);
+            if (d.low) aL.push(d.low);
+          } else {
+            row.push(null, null, null);
+          }
+        }
+        row.push(aL.length ? Math.min(...aL) : null);
+        ws5.addRow(row);
+      }
+      ws5.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: ws5.columnCount } };
     }
 
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, ws1, "Deal Analysis");
-    XLSX.utils.book_append_sheet(workbook, ws2, "Buy List");
-    XLSX.utils.book_append_sheet(workbook, ws3, "Summary");
-    XLSX.utils.book_append_sheet(workbook, ws4, "Target PO");
-    if (ws5) XLSX.utils.book_append_sheet(workbook, ws5, "Price History");
-    XLSX.writeFile(workbook, `keepa_analysis_${new Date().toISOString().split("T")[0]}.xlsx`);
+    // ─── Write the file ───────────────────────────────────────────────────
+    const buffer = await wb.xlsx.writeBuffer();
+    const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `ottrd_analysis_${new Date().toISOString().split("T")[0]}.xlsx`;
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
   const filteredResults = results.filter(r => {
@@ -462,7 +790,7 @@ export default function AnalyzePage() {
                   <th className="px-3 py-3 text-right">Target Buy</th>
                   <th className="px-3 py-3">Gap</th>
                   <th className="px-3 py-3">% Off</th>
-<th className="px-3 py-3 text-right">Sellers (Avg)</th>
+                  <th className="px-3 py-3 text-right">Sellers (Avg)</th>
                   <th className="px-3 py-3 text-center">FBA / FBM</th>
                   <th className="px-3 py-3 text-center">Amz 180d</th>
                   <th className="px-3 py-3 text-right">Amz BB%</th>
@@ -494,7 +822,7 @@ export default function AnalyzePage() {
                       <td className="px-3 py-2.5 text-right font-mono text-blue-400">{fmtDollars(r.targetSupplier)}</td>
                       <td className={`px-3 py-2.5 text-xs whitespace-nowrap ${r.priceGap!=null?(r.priceGap<=0?"text-green-400":"text-amber-400"):"text-ottrd-muted"}`}>{r.priceGap!=null?(r.priceGap<=0?"On target":`$${r.priceGap.toFixed(2)} off`):"—"}</td>
                       <td className={`px-3 py-2.5 text-xs whitespace-nowrap ${r.pctOffNeeded!=null?(r.pctOffNeeded<=0?"text-green-400":r.pctOffNeeded<=10?"text-amber-400":"text-red-400"):"text-ottrd-muted"}`}>{r.pctOffNeeded!=null?(r.pctOffNeeded<=0?"On target":`${r.pctOffNeeded.toFixed(1)}%`):"—"}</td>
-<td className="px-3 py-2.5 text-right font-mono text-ottrd-muted text-xs">{r.avgSellersFiltered != null ? r.avgSellersFiltered.toFixed(1) : (r.currentSellers != null ? r.currentSellers : "—")}</td>
+                      <td className="px-3 py-2.5 text-right font-mono text-ottrd-muted text-xs">{r.avgSellersFiltered != null ? r.avgSellersFiltered.toFixed(1) : (r.currentSellers != null ? r.currentSellers : "—")}</td>
                       <td className="px-3 py-2.5 text-center font-mono text-xs text-ottrd-muted">{r.fbaCount != null ? `${r.fbaCount} / ${r.fbmCount}` : "—"}</td>
                       <td className="px-3 py-2.5 text-center text-xs"><span className={r.amazonOnListing180d ? "text-red-400 font-bold" : "text-green-400"}>{r.amazonOnListing180d == null ? "—" : (r.amazonOnListing180d ? "YES" : "NO")}</span></td>
                       <td className={`px-3 py-2.5 text-right font-mono text-xs ${r.amazonBbWinPct != null ? (r.amazonBbWinPct >= 20 ? "text-red-400" : r.amazonBbWinPct >= 5 ? "text-amber-400" : "text-green-400") : "text-ottrd-muted"}`}>{r.amazonBbWinPct != null ? `${r.amazonBbWinPct.toFixed(1)}%` : "—"}</td>
