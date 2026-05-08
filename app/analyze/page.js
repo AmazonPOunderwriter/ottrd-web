@@ -280,6 +280,7 @@ export default function AnalyzePage() {
       "Target Buy", "Gap", "% Off Needed",
       "Sellers (Avg Sel)", "Current Sellers", "FBA", "FBM",
       "Amz On Listing 180d", "Amz BB Win %", "Top 3P BB Win %",
+      "Days to Sell Out",
       "Decision",
     ];
 
@@ -323,6 +324,7 @@ export default function AnalyzePage() {
       { width: 12, fmt: FMT.text   },
       { width: 11, fmt: FMT.pct    },
       { width: 11, fmt: FMT.pct    },
+      { width: 11, fmt: '0"d";"—"' },
       { width: 11, fmt: FMT.text   },
     ];
     for (let i = 0; i < phKeys.length; i++) {
@@ -358,6 +360,7 @@ export default function AnalyzePage() {
         r.avgSellersFiltered ?? null, r.currentSellers ?? null, r.fbaCount ?? null, r.fbmCount ?? null,
         r.amazonOnListing180d == null ? "—" : (r.amazonOnListing180d ? "YES" : "NO"),
         pctVal(r.amazonBbWinPct), pctVal(r.topThirdPartyBbWinPct),
+        r.daysToSellOut ?? null,
         r.decision,
       ];
 
@@ -383,8 +386,8 @@ export default function AnalyzePage() {
         roiCell.font = { bold: true };
       }
 
-      // Decision cell
-      const decCell = row.getCell(37);
+      // Decision cell (now column 38 after Sell-Out was added at 37)
+      const decCell = row.getCell(38);
       let decColor = C.decPass;
       if (r.decision === "Buy") decColor = C.decBuy;
       else if (r.decision === "Review") decColor = C.decReview;
@@ -392,6 +395,17 @@ export default function AnalyzePage() {
       decCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: decColor } };
       decCell.font = { bold: true };
       decCell.alignment = { horizontal: "center" };
+
+      // Sell-Out cell (column 37): green <60d, amber 60-120d, red >120d
+      if (r.daysToSellOut != null) {
+        const soCell = row.getCell(37);
+        let soFill = C.roiLow;
+        if (r.daysToSellOut < 60) soFill = C.roiHigh;
+        else if (r.daysToSellOut <= 120) soFill = C.roiMid;
+        soCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: soFill } };
+        soCell.font = { bold: true };
+        soCell.alignment = { horizontal: "right" };
+      }
 
       row.getCell(21).alignment = { horizontal: "center" };
       row.getCell(34).alignment = { horizontal: "center" };
@@ -428,17 +442,20 @@ export default function AnalyzePage() {
       "Net Profit", "ROI",
       "Target Buy", "Gap", "% Off",
       "Peak (Sel)", "Avg (Sel)", "Sug Qty", "Qty Basis",
+      "Days to Sell Out",
       "Decision",
     ];
     ws2.addRow(buyHeaders);
     styleHeader(ws2.getRow(1));
-    const ws2Specs = [14, 14, 12, 42, 12, 12, 11, 11, 9, 11, 16, 14, 9, 9, 9, 16, 11];
+    const ws2Specs = [14, 14, 12, 42, 12, 12, 11, 11, 9, 11, 16, 14, 9, 9, 9, 16, 13, 11];
     const ws2Fmts = [
       FMT.text, FMT.text, FMT.text, FMT.text,
       FMT.money, FMT.money, FMT.money,
       FMT.money, FMT.pct,
       FMT.money, FMT.text, FMT.text,
-      FMT.intRaw, FMT.int, FMT.intRaw, FMT.text, FMT.text,
+      FMT.intRaw, FMT.int, FMT.intRaw, FMT.text,
+      '0"d";"—"',
+      FMT.text,
     ];
     ws2Specs.forEach((w, i) => { ws2.getColumn(i + 1).width = w; ws2.getColumn(i + 1).numFmt = ws2Fmts[i]; });
 
@@ -453,6 +470,7 @@ export default function AnalyzePage() {
         r.netProfit ?? null, pctVal(r.roi),
         r.targetSupplier ?? null, gapStr, pctStr,
         r.peakFiltered || null, r.avgFiltered || null, r.suggestedQty || null, r.qtyBasis || "—",
+        r.daysToSellOut ?? null,
         r.decision,
       ]);
       const roiCell = row.getCell(9);
@@ -461,7 +479,16 @@ export default function AnalyzePage() {
         roiCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: fillColor } };
         roiCell.font = { bold: true };
       }
-      const decCell = row.getCell(17);
+      // Sell-Out cell (col 17) coloring
+      if (r.daysToSellOut != null) {
+        const soCell = row.getCell(17);
+        let soFill = C.roiLow;
+        if (r.daysToSellOut < 60) soFill = C.roiHigh;
+        else if (r.daysToSellOut <= 120) soFill = C.roiMid;
+        soCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: soFill } };
+        soCell.font = { bold: true };
+      }
+      const decCell = row.getCell(18);
       decCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: r.decision === "Buy" ? C.decBuy : C.decReview } };
       decCell.font = { bold: true };
       decCell.alignment = { horizontal: "center" };
@@ -795,6 +822,7 @@ export default function AnalyzePage() {
                   <th className="px-3 py-3 text-center">Amz 180d</th>
                   <th className="px-3 py-3 text-right">Amz BB%</th>
                   <th className="px-3 py-3 text-right">3P BB%</th>
+                  <th className="px-3 py-3 text-right">Sell-Out</th>
                   <th className="px-3 py-3 text-center">Decision</th>
                   {mk.map(m=>(<th key={m} className="px-2 py-3 text-center text-[10px]">{m}</th>))}
                 </tr>
@@ -827,6 +855,7 @@ export default function AnalyzePage() {
                       <td className="px-3 py-2.5 text-center text-xs"><span className={r.amazonOnListing180d ? "text-red-400 font-bold" : "text-green-400"}>{r.amazonOnListing180d == null ? "—" : (r.amazonOnListing180d ? "YES" : "NO")}</span></td>
                       <td className={`px-3 py-2.5 text-right font-mono text-xs ${r.amazonBbWinPct != null ? (r.amazonBbWinPct >= 20 ? "text-red-400" : r.amazonBbWinPct >= 5 ? "text-amber-400" : "text-green-400") : "text-ottrd-muted"}`}>{r.amazonBbWinPct != null ? `${r.amazonBbWinPct.toFixed(1)}%` : "—"}</td>
                       <td className="px-3 py-2.5 text-right font-mono text-xs text-ottrd-muted">{r.topThirdPartyBbWinPct != null ? `${r.topThirdPartyBbWinPct.toFixed(1)}%` : "—"}</td>
+                      <td className={`px-3 py-2.5 text-right font-mono text-xs whitespace-nowrap ${r.daysToSellOut != null ? (r.daysToSellOut < 60 ? "text-green-400 font-bold" : r.daysToSellOut <= 120 ? "text-amber-400" : "text-red-400") : "text-ottrd-muted"}`}>{r.daysToSellOut != null ? `${r.daysToSellOut}d` : "—"}</td>
                       <td className="px-3 py-2.5 text-center"><span className={`inline-block px-2.5 py-1 rounded-full text-xs font-medium badge-${r.decision.toLowerCase()}`}>{r.decision}</span></td>
                       {mk.map(m=>{const v=(r.monthly||{})[m];return(<td key={m} className={`px-2 py-2.5 text-center font-mono text-xs ${v!=null&&v>=threshold?"text-green-400 font-bold bg-green-900/20":v!=null&&v>0?"text-yellow-300":"text-ottrd-muted/30"}`}>{v!=null?v:""}</td>);})}
                     </tr>
