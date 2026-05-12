@@ -63,10 +63,157 @@ const MONTH_NAMES = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct"
 function fmtDollars(v) { return v != null ? `$${v.toFixed(2)}` : "—"; }
 function fmtPct(v) { return v != null ? `${v.toFixed(1)}%` : "—"; }
 
+// Parse FBA Inventory report (CSV or Excel). Returns Map<ASIN, { qty, sku, name }>.
+async function parseInventoryReport(file) {
+  const data = await file.arrayBuffer();
+  const wb = XLSX.read(data, { type: "array" });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  // Amazon's Manage FBA Inventory report is tab-separated, but xlsx.read with
+  // raw bytes typically handles both. Try sheet_to_json first.
+  let rows = XLSX.utils.sheet_to_json(ws, { defval: "" });
+  // Some reports come through as single-column rows if the delimiter is wrong.
+  // Detect and re-parse as TSV if so.
+  if (rows.length && Object.keys(rows[0]).length <= 2) {
+    const text = new TextDecoder().decode(data);
+    const lines = text.split(/\r?\n/).filter(Boolean);
+    if (lines.length >= 2) {
+      const sep = lines[0].includes("\t") ? "\t" : ",";
+      const headers = lines[0].split(sep);
+      rows = lines.slice(1).map((line) => {
+        const cells = line.split(sep);
+        const obj = {};
+        headers.forEach((h, i) => { obj[h] = cells[i] ?? ""; });
+        return obj;
+      });
+    }
+  }
+  if (!rows.length) return new Map();
+
+  // Find ASIN and quantity columns by best-match name. Amazon's column names:
+  //   asin, afn-fulfillable-quantity, sku, product-name
+  const cols = Object.keys(rows[0]);
+  const find = (substrings) => {
+    const lower = cols.map((c) => c.toLowerCase());
+    for (const sub of substrings) {
+      const idx = lower.findIndex((c) => c === sub);
+      if (idx >= 0) return cols[idx];
+    }
+    for (const sub of substrings) {
+      const idx = lower.findIndex((c) => c.includes(sub));
+      if (idx >= 0) return cols[idx];
+    }
+    return null;
+  };
+
+  const asinCol = find(["asin"]);
+  const qtyCol = find(["afn-fulfillable-quantity", "fulfillable quantity", "available", "afn-warehouse-quantity"]);
+  const inboundShippedCol = find(["afn-inbound-shipped-quantity"]);
+  const inboundReceivingCol = find(["afn-inbound-receiving-quantity"]);
+  const inboundWorkingCol = find(["afn-inbound-working-quantity"]);
+  const reservedCol = find(["afn-reserved-quantity"]);
+  const skuCol = find(["sku"]);
+  const nameCol = find(["product-name", "product name", "title"]);
+
+  if (!asinCol || !qtyCol) return new Map();
+
+  const toInt = (v) => {
+    const n = parseInt(String(v ?? "").replace(/[^\d-]/g, ""), 10);
+    return isNaN(n) ? 0 : n;
+  };
+
+  const map = new Map();
+  for (const row of rows) {
+    const asin = String(row[asinCol] || "").trim().toUpperCase();
+    if (!asin) continue;
+    const qty = toInt(row[qtyCol]);
+    // Inbound = shipped + receiving (units en route to/being processed at FBA).
+    // Working = upstream from these; we exclude it so the number reflects what
+    // will actually be sellable soon, not what's still being prepped at your warehouse.
+    const inbound = (inboundShippedCol ? toInt(row[inboundShippedCol]) : 0)
+                  + (inboundReceivingCol ? toInt(row[inboundReceivingCol]) : 0);
+    const reserved = reservedCol ? toInt(row[reservedCol]) : 0;
+    const sku = skuCol ? String(row[skuCol] || "").trim() : "";
+    const name = nameCol ? String(row[nameCol] || "").trim() : "";
+    if (map.has(asin)) {
+      const prev = map.get(asin);
+      map.set(asin, {
+        qty: (prev.qty || 0) + qty,
+        inbound: (prev.inbound || 0) + inbound,
+        reserved: (prev.reserved || 0) + reserved,
+        sku: prev.sku || sku,
+        name: prev.name || name,
+      });
+    } else {
+      map.set(asin, { qty, inbound, reserved, sku, name });
+    }
+  }
+  return map;
+}
+
+// Parse Business Report (Sales and Traffic by Child Item). Returns Map<ASIN, { units, sales }>.
+async function parseSalesReport(file) {
+  const data = await file.arrayBuffer();
+  const wb = XLSX.read(data, { type: "array" });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  let rows = XLSX.utils.sheet_to_json(ws, { defval: "" });
+  if (rows.length && Object.keys(rows[0]).length <= 2) {
+    const text = new TextDecoder().decode(data);
+    const lines = text.split(/\r?\n/).filter(Boolean);
+    if (lines.length >= 2) {
+      const sep = lines[0].includes("\t") ? "\t" : ",";
+      const headers = lines[0].split(sep);
+      rows = lines.slice(1).map((line) => {
+        const cells = line.split(sep);
+        const obj = {};
+        headers.forEach((h, i) => { obj[h] = cells[i] ?? ""; });
+        return obj;
+      });
+    }
+  }
+  if (!rows.length) return new Map();
+
+  const cols = Object.keys(rows[0]);
+  // We specifically want CHILD ASIN, not parent. The Business Report has both.
+  const childCol = cols.find((c) => /child.*asin/i.test(c)) || cols.find((c) => /^asin$/i.test(c)) || cols.find((c) => /asin/i.test(c) && !/parent/i.test(c));
+  const unitsCol = cols.find((c) => /units\s*ordered/i.test(c) && !/b2b/i.test(c)) || cols.find((c) => /units\s*ordered/i.test(c));
+  const salesCol = cols.find((c) => /ordered\s*product\s*sales/i.test(c) && !/b2b/i.test(c));
+
+  if (!childCol || !unitsCol) return new Map();
+
+  const map = new Map();
+  for (const row of rows) {
+    const asin = String(row[childCol] || "").trim().toUpperCase();
+    if (!asin) continue;
+    const units = parseInt(String(row[unitsCol]).replace(/[^\d-]/g, ""), 10);
+    const salesRaw = salesCol ? String(row[salesCol]).replace(/[^\d.-]/g, "") : "";
+    const sales = salesRaw ? parseFloat(salesRaw) : null;
+    if (map.has(asin)) {
+      const prev = map.get(asin);
+      map.set(asin, {
+        units: (prev.units || 0) + (isNaN(units) ? 0 : units),
+        sales: (prev.sales != null || sales != null) ? (prev.sales || 0) + (sales || 0) : null,
+      });
+    } else {
+      map.set(asin, { units: isNaN(units) ? 0 : units, sales });
+    }
+  }
+  return map;
+}
+
 export default function AnalyzePage() {
   const [file, setFile] = useState(null);
   const [fileName, setFileName] = useState("");
   const [dragOver, setDragOver] = useState(false);
+
+  // Amazon report uploads (all optional).
+  // Maps are keyed by ASIN (uppercased). Empty Map = report not uploaded.
+  const [invMap, setInvMap] = useState(new Map());
+  const [invFileName, setInvFileName] = useState("");
+  const [salesMap, setSalesMap] = useState(new Map());
+  const [salesFileName, setSalesFileName] = useState("");
+  const [salesWindowDays, setSalesWindowDays] = useState(90);
+  const invInputRef = useRef(null);
+  const salesInputRef = useRef(null);
 
   const [threshold, setThreshold] = useState(50);
   const [minRoi, setMinRoi] = useState(30);
@@ -108,6 +255,33 @@ export default function AnalyzePage() {
   }, [logs]);
 
   const handleFile = useCallback((f) => { setFile(f); setFileName(f.name); }, []);
+
+  const handleInvFile = useCallback(async (f) => {
+    setInvFileName(f.name);
+    try {
+      const m = await parseInventoryReport(f);
+      setInvMap(m);
+      if (m.size === 0) alert("Couldn't parse inventory report — make sure it's the FBA Inventory CSV with an 'asin' and 'afn-fulfillable-quantity' column.");
+    } catch (e) {
+      alert(`Failed to parse inventory report: ${e.message}`);
+      setInvMap(new Map());
+    }
+  }, []);
+
+  const handleSalesFile = useCallback(async (f) => {
+    setSalesFileName(f.name);
+    try {
+      const m = await parseSalesReport(f);
+      setSalesMap(m);
+      if (m.size === 0) alert("Couldn't parse sales report — make sure it's the Business Report (Sales and Traffic by Child Item) with a '(Child) ASIN' and 'Units Ordered' column.");
+    } catch (e) {
+      alert(`Failed to parse sales report: ${e.message}`);
+      setSalesMap(new Map());
+    }
+  }, []);
+
+  const clearInv = () => { setInvMap(new Map()); setInvFileName(""); };
+  const clearSales = () => { setSalesMap(new Map()); setSalesFileName(""); };
 
   const onDrop = useCallback((e) => {
     e.preventDefault(); setDragOver(false);
@@ -278,8 +452,14 @@ export default function AnalyzePage() {
       "Sellers (Avg Sel)", "Current Sellers", "FBA", "FBM",
       "Amz On Listing 180d", "Amz BB Win %", "Top 3P BB Win %",
       "Days to Sell Out",
-      "Decision",
     ];
+    // Amazon report columns (only included when relevant report was uploaded).
+    if (invMap.size > 0) {
+      baseHeaders.push("In Stock", "Inbound", "Reserved");
+    }
+    if (salesMap.size > 0) baseHeaders.push(`Velocity / mo (${salesWindowDays}d)`);
+    if (invMap.size > 0 && salesMap.size > 0) baseHeaders.push("Days of Supply");
+    baseHeaders.push("Decision");
 
     ws1.addRow([...baseHeaders, ...phHeader, ...mk]);
     styleHeader(ws1.getRow(1));
@@ -322,8 +502,16 @@ export default function AnalyzePage() {
       { width: 11, fmt: FMT.pct    },
       { width: 11, fmt: FMT.pct    },
       { width: 11, fmt: '0"d";"—"' },
-      { width: 11, fmt: FMT.text   },
     ];
+    // Amazon report column specs match the conditional headers above
+    if (invMap.size > 0) {
+      colSpecs.push({ width: 10, fmt: '#,##0;"—"' });   // In Stock
+      colSpecs.push({ width: 10, fmt: '#,##0;"—"' });   // Inbound
+      colSpecs.push({ width: 10, fmt: '#,##0;"—"' });   // Reserved
+    }
+    if (salesMap.size > 0) colSpecs.push({ width: 14, fmt: '0.0"/mo";"—"' });
+    if (invMap.size > 0 && salesMap.size > 0) colSpecs.push({ width: 11, fmt: '0"d";"—"' });
+    colSpecs.push({ width: 11, fmt: FMT.text });  // Decision
     for (let i = 0; i < phKeys.length; i++) {
       colSpecs.push({ width: 11, fmt: FMT.money });
       colSpecs.push({ width: 11, fmt: FMT.money });
@@ -338,11 +526,28 @@ export default function AnalyzePage() {
       col.numFmt = spec.fmt;
     });
 
+    // Number of extra Amazon-report columns inserted between Days-to-Sell-Out and Decision
+    const extraAmzCols = (invMap.size > 0 ? 3 : 0) + (salesMap.size > 0 ? 1 : 0) + (invMap.size > 0 && salesMap.size > 0 ? 1 : 0);
+
     for (const r of results) {
       const eH = Object.values(r.monthly || {}).some((v) => v >= threshold);
       const gap = r.priceGap;
       const gapStr = gap != null ? (gap <= 0 ? "On target" : `Need $${gap.toFixed(2)} lower`) : "—";
       const pctStr = r.pctOffNeeded != null ? (r.pctOffNeeded <= 0 ? "On target" : `${r.pctOffNeeded.toFixed(1)}% off needed`) : "—";
+
+      // Re-derive Amazon report values for this ASIN
+      const asinKey = (r.asin || "").toUpperCase();
+      const invHit = invMap.size > 0 ? (asinKey ? invMap.get(asinKey) : null) : null;
+      const salesHit = salesMap.size > 0 ? (asinKey ? salesMap.get(asinKey) : null) : null;
+      const inStockVal = invMap.size > 0 ? (invHit ? invHit.qty : null) : null;
+      const inboundVal = invMap.size > 0 ? (invHit ? (invHit.inbound || 0) : null) : null;
+      const reservedVal = invMap.size > 0 ? (invHit ? (invHit.reserved || 0) : null) : null;
+      const velPerMo = (salesMap.size > 0 && salesHit && salesWindowDays > 0)
+        ? Math.round((salesHit.units / salesWindowDays) * 30 * 10) / 10
+        : null;
+      const daysSupply = (invHit && velPerMo && velPerMo > 0)
+        ? Math.round((invHit.qty / velPerMo) * 30)
+        : null;
 
       const baseVals = [
         r.sku || "", r.upc || "", r.asin || "", r.title || "",
@@ -358,8 +563,11 @@ export default function AnalyzePage() {
         r.amazonOnListing180d == null ? "—" : (r.amazonOnListing180d ? "YES" : "NO"),
         pctVal(r.amazonBbWinPct), pctVal(r.topThirdPartyBbWinPct),
         r.daysToSellOut ?? null,
-        r.decision,
       ];
+      if (invMap.size > 0) baseVals.push(inStockVal, inboundVal, reservedVal);
+      if (salesMap.size > 0) baseVals.push(velPerMo);
+      if (invMap.size > 0 && salesMap.size > 0) baseVals.push(daysSupply);
+      baseVals.push(r.decision);
 
       const phVals = [];
       for (const k of phKeys) {
@@ -383,16 +591,6 @@ export default function AnalyzePage() {
         roiCell.font = { bold: true };
       }
 
-      // Decision cell (now column 38 after Sell-Out was added at 37)
-      const decCell = row.getCell(38);
-      let decColor = C.decPass;
-      if (r.decision === "Buy") decColor = C.decBuy;
-      else if (r.decision === "Review") decColor = C.decReview;
-      else if (!r.found) decColor = C.decNotFound;
-      decCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: decColor } };
-      decCell.font = { bold: true };
-      decCell.alignment = { horizontal: "center" };
-
       // Sell-Out cell (column 37): green <60d, amber 60-120d, red >120d
       if (r.daysToSellOut != null) {
         const soCell = row.getCell(37);
@@ -403,6 +601,26 @@ export default function AnalyzePage() {
         soCell.font = { bold: true };
         soCell.alignment = { horizontal: "right" };
       }
+
+      // Days of Supply coloring (last Amazon column when both reports uploaded)
+      if (invMap.size > 0 && salesMap.size > 0 && daysSupply != null) {
+        const dosColIdx = 37 + extraAmzCols; // sits right before Decision
+        const dosCell = row.getCell(dosColIdx);
+        const dosFill = daysSupply >= 60 ? C.roiHigh : daysSupply >= 30 ? C.roiMid : C.roiLow;
+        dosCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: dosFill } };
+        dosCell.font = { bold: true };
+      }
+
+      // Decision cell (column index shifts based on how many Amazon cols were added)
+      const decColIdx = 38 + extraAmzCols;
+      const decCell = row.getCell(decColIdx);
+      let decColor = C.decPass;
+      if (r.decision === "Buy") decColor = C.decBuy;
+      else if (r.decision === "Review") decColor = C.decReview;
+      else if (!r.found) decColor = C.decNotFound;
+      decCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: decColor } };
+      decCell.font = { bold: true };
+      decCell.alignment = { horizontal: "center" };
 
       row.getCell(21).alignment = { horizontal: "center" };
       row.getCell(34).alignment = { horizontal: "center" };
@@ -620,7 +838,48 @@ export default function AnalyzePage() {
     URL.revokeObjectURL(url);
   };
 
-  const filteredResults = results.filter(r => {
+  // Enrich raw results with Amazon report data, joined by ASIN.
+  // - inStock: number from inventory map, or "never_sold" if SKU not present
+  // - velocityPerMo: from sales map (units / window × 30), or "never_sold"
+  // - daysOfSupply: inStock / (velocity/30), only when both reports present
+  const enrichedResults = results.map((r) => {
+    const asin = (r.asin || "").toUpperCase();
+    let inStock = undefined;
+    let inbound = undefined;
+    let reserved = undefined;
+    let velocityPerMo = undefined;
+    let velocityRaw = undefined;
+    let daysOfSupply = undefined;
+
+    if (invMap.size > 0) {
+      const inv = asin ? invMap.get(asin) : null;
+      if (inv) {
+        inStock = inv.qty;
+        inbound = inv.inbound || 0;
+        reserved = inv.reserved || 0;
+      } else {
+        inStock = "never_sold";
+        inbound = "never_sold";
+        reserved = "never_sold";
+      }
+    }
+    if (salesMap.size > 0) {
+      const s = asin ? salesMap.get(asin) : null;
+      if (s) {
+        velocityRaw = s.units;
+        velocityPerMo = salesWindowDays > 0 ? Math.round((s.units / salesWindowDays) * 30 * 10) / 10 : 0;
+      } else {
+        velocityRaw = "never_sold";
+        velocityPerMo = "never_sold";
+      }
+    }
+    if (typeof inStock === "number" && typeof velocityPerMo === "number" && velocityPerMo > 0) {
+      daysOfSupply = Math.round((inStock / velocityPerMo) * 30);
+    }
+    return { ...r, inStock, inbound, reserved, velocityPerMo, velocityRaw, daysOfSupply };
+  });
+
+  const filteredResults = enrichedResults.filter(r => {
     if (resultFilter === "buy") return r.decision === "Buy" || r.decision === "Review";
     if (resultFilter === "pass") return r.decision === "Pass";
     return true;
@@ -670,7 +929,69 @@ export default function AnalyzePage() {
             <p className="text-ottrd-muted/60 text-xs mt-3">Needs a UPC column and a cost/price column at minimum.</p>
           </Sec>
 
-          <Sec title="Step 2 - Deal thresholds" d="0.1s">
+          <Sec title="Step 2 - Amazon reports (optional)" d="0.1s">
+            <p className="text-ottrd-muted text-sm mb-4">Upload your FBA inventory and/or sales reports to see your in-stock counts, velocity, and days of supply per SKU. Both are optional — Ottrd works without them.</p>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {/* Inventory upload */}
+              <div>
+                <label className="block text-sm text-ottrd-muted mb-2">FBA Inventory Report</label>
+                <div className="drop-zone border-2 border-dashed rounded-xl p-5 text-center cursor-pointer border-ottrd-border hover:border-ottrd-muted transition-all"
+                  onClick={() => invInputRef.current?.click()}>
+                  <input ref={invInputRef} type="file" accept=".csv,.tsv,.txt,.xlsx,.xls" className="hidden" onChange={e => e.target.files[0] && handleInvFile(e.target.files[0])}/>
+                  {invFileName ? (
+                    <div>
+                      <div className="text-ottrd-text font-medium text-sm">{invFileName}</div>
+                      <div className="text-green-400 text-xs mt-1">{invMap.size} SKUs loaded</div>
+                      <button onClick={(e) => { e.stopPropagation(); clearInv(); }} className="text-xs text-ottrd-muted hover:text-red-400 mt-2">Remove</button>
+                    </div>
+                  ) : (
+                    <div>
+                      <div className="text-ottrd-muted text-sm">Drop FBA inventory CSV</div>
+                      <div className="text-ottrd-muted/50 text-xs mt-1">or click to browse</div>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Sales upload */}
+              <div>
+                <label className="block text-sm text-ottrd-muted mb-2">Sales Report (Business Reports)</label>
+                <div className="drop-zone border-2 border-dashed rounded-xl p-5 text-center cursor-pointer border-ottrd-border hover:border-ottrd-muted transition-all"
+                  onClick={() => salesInputRef.current?.click()}>
+                  <input ref={salesInputRef} type="file" accept=".csv,.tsv,.txt,.xlsx,.xls" className="hidden" onChange={e => e.target.files[0] && handleSalesFile(e.target.files[0])}/>
+                  {salesFileName ? (
+                    <div>
+                      <div className="text-ottrd-text font-medium text-sm">{salesFileName}</div>
+                      <div className="text-green-400 text-xs mt-1">{salesMap.size} SKUs loaded</div>
+                      <button onClick={(e) => { e.stopPropagation(); clearSales(); }} className="text-xs text-ottrd-muted hover:text-red-400 mt-2">Remove</button>
+                    </div>
+                  ) : (
+                    <div>
+                      <div className="text-ottrd-muted text-sm">Drop sales CSV</div>
+                      <div className="text-ottrd-muted/50 text-xs mt-1">or click to browse</div>
+                    </div>
+                  )}
+                </div>
+
+                {salesMap.size > 0 && (
+                  <div className="mt-3">
+                    <label className="block text-xs text-ottrd-muted mb-1.5">Days covered by this report:</label>
+                    <div className="flex gap-2">
+                      {[30, 60, 90, 120].map((d) => (
+                        <button key={d} onClick={() => setSalesWindowDays(d)}
+                          className={`flex-1 py-1.5 rounded text-xs font-medium border transition-all ${salesWindowDays === d ? "bg-ottrd-accent/20 border-ottrd-accent text-ottrd-accent" : "border-ottrd-border text-ottrd-muted hover:text-ottrd-text"}`}>
+                          {d}d
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </Sec>
+
+          <Sec title="Step 3 - Deal thresholds" d="0.2s">
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
               <SI label="Sales threshold" value={threshold} onChange={setThreshold} suffix="/mo"/>
               <SI label="Min ROI %" value={minRoi} onChange={setMinRoi} suffix="%"/>
@@ -680,9 +1001,9 @@ export default function AnalyzePage() {
             <p className="text-ottrd-muted/50 text-xs mt-3">SKUs below min profit $ but above min ROI% are flagged orange. Overhead adds a % to cost for freight, prep, supplies.</p>
           </Sec>
 
-          <Sec title="Step 3 - Price basis for ROI" d="0.2s">
+          <Sec title="Step 4 - Price basis for ROI" d="0.3s">
             <div className="flex flex-wrap gap-2 mb-4">
-              {[["min_selected","Min of selected"],["current","Today's BB"],["avg30","30-day avg"],["avg90","90-day avg"],["avg180","180-day avg"],["avg365","365-day avg"],["monthly_low","Monthly low (Step 5)"]].map(([v,l])=>(
+              {[["min_selected","Min of selected"],["current","Today's BB"],["avg30","30-day avg"],["avg90","90-day avg"],["avg180","180-day avg"],["avg365","365-day avg"],["monthly_low","Monthly low (Step 6)"]].map(([v,l])=>(
                 <button key={v} onClick={()=>setPriceBasis(v)} className={`px-3 py-2 rounded-lg text-sm border transition-all ${priceBasis===v?"bg-ottrd-accent/20 border-ottrd-accent text-ottrd-accent":"border-ottrd-border text-ottrd-muted hover:text-ottrd-text"}`}>{l}</button>
               ))}
             </div>
@@ -697,7 +1018,7 @@ export default function AnalyzePage() {
             <p className="text-ottrd-muted/50 text-xs mt-3">Tip: "Min of selected" is the most conservative - uses the lowest price across your chosen windows.</p>
           </Sec>
 
-          <Sec title="Step 4 - Peak sales months and order qty" d="0.3s">
+          <Sec title="Step 5 - Peak sales months and order qty" d="0.4s">
             <p className="text-ottrd-muted text-sm mb-3">Include only these months when calculating peak sales and suggested order qty:</p>
             <div className="flex flex-wrap gap-2 mb-4">
               {MONTH_NAMES.map(m=>(<button key={m} onClick={()=>setMonthFilters(prev=>({...prev,[m]:!prev[m]}))} className={`w-12 py-2 rounded-lg text-xs font-medium border transition-all ${monthFilters[m]?"bg-ottrd-accent/20 border-ottrd-accent text-ottrd-accent":"border-ottrd-border text-ottrd-muted hover:text-ottrd-text"}`}>{m}</button>))}
@@ -722,7 +1043,7 @@ export default function AnalyzePage() {
             </div>
           </Sec>
 
-          <Sec title="Step 5 - Monthly price history (optional)" d="0.4s">
+          <Sec title="Step 6 - Monthly price history (optional)" d="0.5s">
             <p className="text-ottrd-muted text-sm mb-3">Select months to analyse: avg price, lowest price, and days at lowest price.</p>
             <div className="grid grid-cols-3 md:grid-cols-6 gap-2 mb-4">
               {phOptions.map(o=>(<button key={o.key} onClick={()=>setPhSelected(prev=>({...prev,[o.key]:!prev[o.key]}))} className={`py-2 rounded-lg text-xs font-medium border transition-all ${phSelected[o.key]?"bg-ottrd-accent/20 border-ottrd-accent text-ottrd-accent":"border-ottrd-border text-ottrd-muted hover:text-ottrd-text"}`}>{o.label}</button>))}
@@ -813,6 +1134,11 @@ export default function AnalyzePage() {
                   <th className="px-3 py-3 text-right">Amz BB%</th>
                   <th className="px-3 py-3 text-right">3P BB%</th>
                   <th className="px-3 py-3 text-right">Sell-Out</th>
+                  {invMap.size > 0 && <th className="px-3 py-3 text-right">In Stock</th>}
+                  {invMap.size > 0 && <th className="px-3 py-3 text-right">Inbound</th>}
+                  {invMap.size > 0 && <th className="px-3 py-3 text-right">Reserved</th>}
+                  {salesMap.size > 0 && <th className="px-3 py-3 text-right">Your Velocity</th>}
+                  {invMap.size > 0 && salesMap.size > 0 && <th className="px-3 py-3 text-right">Days of Supply</th>}
                   <th className="px-3 py-3 text-center">Decision</th>
                   {mk.map(m=>(<th key={m} className="px-2 py-3 text-center text-[10px]">{m}</th>))}
                 </tr>
@@ -846,6 +1172,43 @@ export default function AnalyzePage() {
                       <td className={`px-3 py-2.5 text-right font-mono text-xs ${r.amazonBbWinPct != null ? (r.amazonBbWinPct >= 20 ? "text-red-400" : r.amazonBbWinPct >= 5 ? "text-amber-400" : "text-green-400") : "text-ottrd-muted"}`}>{r.amazonBbWinPct != null ? `${r.amazonBbWinPct.toFixed(1)}%` : "—"}</td>
                       <td className="px-3 py-2.5 text-right font-mono text-xs text-ottrd-muted">{r.topThirdPartyBbWinPct != null ? `${r.topThirdPartyBbWinPct.toFixed(1)}%` : "—"}</td>
                       <td className={`px-3 py-2.5 text-right font-mono text-xs whitespace-nowrap ${r.daysToSellOut != null ? (r.daysToSellOut < 60 ? "text-green-400 font-bold" : r.daysToSellOut <= 120 ? "text-amber-400" : "text-red-400") : "text-ottrd-muted"}`}>{r.daysToSellOut != null ? `${r.daysToSellOut}d` : "—"}</td>
+                      {invMap.size > 0 && (
+                        <td className="px-3 py-2.5 text-right font-mono text-xs whitespace-nowrap">
+                          {r.inStock === "never_sold" ? <span className="text-ottrd-muted/50 italic">Never sold</span>
+                            : typeof r.inStock === "number" ? <span className={r.inStock > 0 ? "text-green-400 font-bold" : "text-amber-500"}>{r.inStock}</span>
+                            : "—"}
+                        </td>
+                      )}
+                      {invMap.size > 0 && (
+                        <td className="px-3 py-2.5 text-right font-mono text-xs whitespace-nowrap">
+                          {r.inbound === "never_sold" ? <span className="text-ottrd-muted/50">—</span>
+                            : typeof r.inbound === "number" ? <span className={r.inbound > 0 ? "text-blue-400" : "text-ottrd-muted"}>{r.inbound}</span>
+                            : "—"}
+                        </td>
+                      )}
+                      {invMap.size > 0 && (
+                        <td className="px-3 py-2.5 text-right font-mono text-xs whitespace-nowrap">
+                          {r.reserved === "never_sold" ? <span className="text-ottrd-muted/50">—</span>
+                            : typeof r.reserved === "number" ? <span className={r.reserved > 0 ? "text-amber-400" : "text-ottrd-muted"}>{r.reserved}</span>
+                            : "—"}
+                        </td>
+                      )}
+                      {salesMap.size > 0 && (
+                        <td className="px-3 py-2.5 text-right font-mono text-xs whitespace-nowrap">
+                          {r.velocityPerMo === "never_sold" ? <span className="text-ottrd-muted/50 italic">Never sold</span>
+                            : typeof r.velocityPerMo === "number" ? (
+                              <span className={r.velocityPerMo > 0 ? "text-green-400" : "text-ottrd-muted"}>
+                                {r.velocityPerMo.toFixed(1)}/mo
+                                <span className="text-ottrd-muted/60 ml-1">({r.velocityRaw} in {salesWindowDays}d)</span>
+                              </span>
+                            ) : "—"}
+                        </td>
+                      )}
+                      {invMap.size > 0 && salesMap.size > 0 && (
+                        <td className={`px-3 py-2.5 text-right font-mono text-xs whitespace-nowrap ${r.daysOfSupply != null ? (r.daysOfSupply >= 60 ? "text-green-400" : r.daysOfSupply >= 30 ? "text-amber-400" : "text-red-400 font-bold") : "text-ottrd-muted"}`}>
+                          {r.daysOfSupply != null ? `${r.daysOfSupply}d` : "—"}
+                        </td>
+                      )}
                       <td className="px-3 py-2.5 text-center"><span className={`inline-block px-2.5 py-1 rounded-full text-xs font-medium badge-${r.decision.toLowerCase()}`}>{r.decision}</span></td>
                       {mk.map(m=>{const v=(r.monthly||{})[m];return(<td key={m} className={`px-2 py-2.5 text-center font-mono text-xs ${v!=null&&v>=threshold?"text-green-400 font-bold bg-green-900/20":v!=null&&v>0?"text-yellow-300":"text-ottrd-muted/30"}`}>{v!=null?v:""}</td>);})}
                     </tr>
