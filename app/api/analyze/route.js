@@ -44,6 +44,7 @@ export async function POST(request) {
           activeMonths = [1,2,3,4,5,6,7,8,9,10,11,12],
           orderBasis = "avg", orderPct = 50,
           phTargetMonths = [], useMonthlyLow = false,
+          includeRating = false,
         } = settings;
 
         const analysisSettings = {
@@ -99,7 +100,7 @@ export async function POST(request) {
 
           let keepaData = {};
           try {
-            const resp = await fetchKeepaBatch(uniqueCodes, apiKey);
+            const resp = await fetchKeepaBatch(uniqueCodes, apiKey, 1, 3, includeRating);
             keepaData = resp.data;
             if (resp.tokensLeft !== undefined) {
               lastTokensLeft = resp.tokensLeft;

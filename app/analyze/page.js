@@ -233,6 +233,7 @@ export default function AnalyzePage() {
 
   const [orderBasis, setOrderBasis] = useState("avg");
   const [orderPct, setOrderPct] = useState(50);
+  const [includeRating, setIncludeRating] = useState(false);
 
   const phOptions = phMonthOptions();
   const [phSelected, setPhSelected] = useState(Object.fromEntries(phOptions.map(o => [o.key, false])));
@@ -315,13 +316,15 @@ export default function AnalyzePage() {
     const costCol = autoCol(columns, ["cost","price","unit cost","wholesale","buy"]);
     const nameCol = autoCol(columns, ["name","title","product","description","item"]);
     const skuCol = autoCol(columns, ["sku","item #","part","model","item no"]);
+    // Supplier-side quantity available (optional).
+    const qtyCol = autoCol(columns, ["qty","quantity","available","stock","on hand","qoh","inventory","units"]);
 
     if (!upcCol) { alert("Can't find UPC column in your file."); setRunning(false); return; }
     if (!costCol) { alert("Can't find cost column in your file."); setRunning(false); return; }
 
     setLogs(prev => [...prev,
       { message: `Loaded: ${fileName} - ${rows.length} rows`, type: "info" },
-      { message: `UPC: ${upcCol} | Cost: ${costCol} | Name: ${nameCol || "(none)"} | SKU: ${skuCol || "(none)"}` },
+      { message: `UPC: ${upcCol} | Cost: ${costCol} | Name: ${nameCol || "(none)"} | SKU: ${skuCol || "(none)"} | Qty: ${qtyCol || "(none)"}` },
     ]);
 
     const items = [];
@@ -332,7 +335,18 @@ export default function AnalyzePage() {
       if (!variants.length || cost <= 0) continue;
       const primary = variants[0];
       if (!primary || ["nan","none",""].includes(primary.toLowerCase())) continue;
-      items.push({ upc: primary, variants, cost, name: nameCol ? String(row[nameCol]).trim() : "", sku: skuCol ? String(row[skuCol]).trim() : "" });
+      // Supplier qty available (optional). Parse defensively — strings like "100",
+      // "1,200", "Out of stock" should all be handled. Non-numeric -> null.
+      let qtyAvail = null;
+      if (qtyCol) {
+        const raw = String(row[qtyCol] ?? "").trim();
+        if (raw) {
+          const cleaned = raw.replace(/[^\d.-]/g, "");
+          const n = parseInt(cleaned, 10);
+          if (!isNaN(n) && n >= 0) qtyAvail = n;
+        }
+      }
+      items.push({ upc: primary, variants, cost, name: nameCol ? String(row[nameCol]).trim() : "", sku: skuCol ? String(row[skuCol]).trim() : "", qtyAvail });
     }
 
     if (!items.length) { setLogs(prev => [...prev, { message: "No valid rows found.", type: "error" }]); setRunning(false); return; }
@@ -351,6 +365,7 @@ export default function AnalyzePage() {
             threshold, minRoi, overhead, minProfit, priceBasis,
             pbMap: { current: pbCurrent, avg30: pbAvg30, avg90: pbAvg90, avg180: pbAvg180, avg365: pbAvg365 },
             activeMonths, orderBasis, orderPct, phTargetMonths, useMonthlyLow,
+            includeRating,
           },
         }),
       });
@@ -460,6 +475,9 @@ export default function AnalyzePage() {
     if (salesMap.size > 0) baseHeaders.push(`Velocity / mo (${salesWindowDays}d)`);
     if (invMap.size > 0 && salesMap.size > 0) baseHeaders.push("Days of Supply");
     baseHeaders.push("Decision");
+    // Trailing columns — placed at the right side to keep cell-index math
+    // for the colored cells stable. Easily sorted/filtered in Excel.
+    baseHeaders.push("Qty Avail (Supplier)", "Listed Since", "Listing Age (mo)", "Reviews", "Rating");
 
     ws1.addRow([...baseHeaders, ...phHeader, ...mk]);
     styleHeader(ws1.getRow(1));
@@ -512,6 +530,12 @@ export default function AnalyzePage() {
     if (salesMap.size > 0) colSpecs.push({ width: 14, fmt: '0.0"/mo";"—"' });
     if (invMap.size > 0 && salesMap.size > 0) colSpecs.push({ width: 11, fmt: '0"d";"—"' });
     colSpecs.push({ width: 11, fmt: FMT.text });  // Decision
+    // Trailing columns: supplier qty, listed since, listing age, reviews, rating
+    colSpecs.push({ width: 12, fmt: '#,##0;"—"' });   // Qty Avail
+    colSpecs.push({ width: 12, fmt: FMT.text });        // Listed Since (YYYY-MM-DD)
+    colSpecs.push({ width: 12, fmt: '#,##0;"—"' });   // Listing Age (mo)
+    colSpecs.push({ width: 11, fmt: '#,##0;"—"' });   // Reviews
+    colSpecs.push({ width: 9,  fmt: '0.0;"—"' });     // Rating
     for (let i = 0; i < phKeys.length; i++) {
       colSpecs.push({ width: 11, fmt: FMT.money });
       colSpecs.push({ width: 11, fmt: FMT.money });
@@ -568,6 +592,14 @@ export default function AnalyzePage() {
       if (salesMap.size > 0) baseVals.push(velPerMo);
       if (invMap.size > 0 && salesMap.size > 0) baseVals.push(daysSupply);
       baseVals.push(r.decision);
+      // Trailing columns
+      baseVals.push(
+        r.qtyAvail ?? null,
+        r.listedSince || "—",
+        r.listingAgeMonths ?? null,
+        r.reviewCount ?? null,
+        r.rating ?? null,
+      );
 
       const phVals = [];
       for (const k of phKeys) {
@@ -999,6 +1031,12 @@ export default function AnalyzePage() {
               <SI label="Overhead %" value={overhead} onChange={setOverhead} suffix="%"/>
             </div>
             <p className="text-ottrd-muted/50 text-xs mt-3">SKUs below min profit $ but above min ROI% are flagged orange. Overhead adds a % to cost for freight, prep, supplies.</p>
+            <div className="mt-4 pt-4 border-t border-ottrd-border">
+              <label className="flex items-center gap-2 text-sm text-ottrd-muted cursor-pointer">
+                <input type="checkbox" checked={includeRating} onChange={e => setIncludeRating(e.target.checked)} className="accent-blue-500"/>
+                Include product reviews &amp; rating <span className="text-ottrd-muted/50 text-xs">(uses extra Keepa tokens — ~1 extra token per SKU)</span>
+              </label>
+            </div>
           </Sec>
 
           <Sec title="Step 4 - Price basis for ROI" d="0.3s">
@@ -1113,6 +1151,7 @@ export default function AnalyzePage() {
                   <th className="px-3 py-3 whitespace-nowrap">Product</th>
                   <th className="px-3 py-3">UPC</th>
                   <th className="px-3 py-3">ASIN</th>
+                  <th className="px-3 py-3 text-right">Qty Avail</th>
                   <th className="px-3 py-3 text-right">Cost</th>
                   <th className="px-3 py-3 text-right">True Cost</th>
                   <th className="px-3 py-3 text-right">Amz Price</th>
@@ -1131,6 +1170,8 @@ export default function AnalyzePage() {
                   <th className="px-3 py-3 text-right">Sellers (Avg)</th>
                   <th className="px-3 py-3 text-center">FBA / FBM</th>
                   <th className="px-3 py-3 text-center">Amz 180d</th>
+                  <th className="px-3 py-3 text-center">Listed</th>
+                  <th className="px-3 py-3 text-right">Reviews</th>
                   <th className="px-3 py-3 text-right">Amz BB%</th>
                   <th className="px-3 py-3 text-right">3P BB%</th>
                   <th className="px-3 py-3 text-right">Sell-Out</th>
@@ -1151,6 +1192,7 @@ export default function AnalyzePage() {
                       <td className="px-3 py-2.5 max-w-[250px] truncate text-ottrd-text" title={r.title}>{r.title}</td>
                       <td className="px-3 py-2.5 font-mono text-xs text-ottrd-muted">{r.upc}</td>
                       <td className="px-3 py-2.5 font-mono text-xs">{r.asin?<a href={`https://amazon.com/dp/${r.asin}`} target="_blank" rel="noopener" className="text-ottrd-accent hover:underline">{r.asin}</a>:"—"}</td>
+                      <td className="px-3 py-2.5 text-right font-mono text-xs text-ottrd-muted">{r.qtyAvail != null ? r.qtyAvail.toLocaleString() : "—"}</td>
                       <td className="px-3 py-2.5 text-right font-mono text-blue-400">{fmtDollars(r.cost)}</td>
                       <td className="px-3 py-2.5 text-right font-mono text-amber-700">{fmtDollars(r.trueCost)}</td>
                       <td className="px-3 py-2.5 text-right font-mono">{fmtDollars(r.amzPrice)}</td>
@@ -1169,6 +1211,28 @@ export default function AnalyzePage() {
                       <td className="px-3 py-2.5 text-right font-mono text-ottrd-muted text-xs">{r.avgSellersFiltered != null ? r.avgSellersFiltered.toFixed(1) : (r.currentSellers != null ? r.currentSellers : "—")}</td>
                       <td className="px-3 py-2.5 text-center font-mono text-xs text-ottrd-muted">{r.fbaCount != null ? `${r.fbaCount} / ${r.fbmCount}` : "—"}</td>
                       <td className="px-3 py-2.5 text-center text-xs"><span className={r.amazonOnListing180d ? "text-red-400 font-bold" : "text-green-400"}>{r.amazonOnListing180d == null ? "—" : (r.amazonOnListing180d ? "YES" : "NO")}</span></td>
+                      <td className="px-3 py-2.5 text-center text-xs whitespace-nowrap">
+                        {r.listedSince ? (
+                          <div>
+                            <div className="text-ottrd-text">{r.listedSince.slice(0, 7)}</div>
+                            {r.listingAgeMonths != null && (
+                              <div className="text-ottrd-muted/60 text-[10px]">
+                                {r.listingAgeMonths >= 24 ? `${(r.listingAgeMonths/12).toFixed(1)} yrs` : `${r.listingAgeMonths} mo`}
+                              </div>
+                            )}
+                          </div>
+                        ) : "—"}
+                      </td>
+                      <td className="px-3 py-2.5 text-right text-xs whitespace-nowrap">
+                        {r.reviewCount != null ? (
+                          <div>
+                            <div className="text-ottrd-text font-mono">{r.reviewCount.toLocaleString()}</div>
+                            {r.rating != null && (
+                              <div className="text-amber-400 text-[10px]">★ {r.rating.toFixed(1)}</div>
+                            )}
+                          </div>
+                        ) : "—"}
+                      </td>
                       <td className={`px-3 py-2.5 text-right font-mono text-xs ${r.amazonBbWinPct != null ? (r.amazonBbWinPct >= 20 ? "text-red-400" : r.amazonBbWinPct >= 5 ? "text-amber-400" : "text-green-400") : "text-ottrd-muted"}`}>{r.amazonBbWinPct != null ? `${r.amazonBbWinPct.toFixed(1)}%` : "—"}</td>
                       <td className="px-3 py-2.5 text-right font-mono text-xs text-ottrd-muted">{r.topThirdPartyBbWinPct != null ? `${r.topThirdPartyBbWinPct.toFixed(1)}%` : "—"}</td>
                       <td className={`px-3 py-2.5 text-right font-mono text-xs whitespace-nowrap ${r.daysToSellOut != null ? (r.daysToSellOut < 60 ? "text-green-400 font-bold" : r.daysToSellOut <= 120 ? "text-amber-400" : "text-red-400") : "text-ottrd-muted"}`}>{r.daysToSellOut != null ? `${r.daysToSellOut}d` : "—"}</td>
