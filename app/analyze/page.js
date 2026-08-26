@@ -219,6 +219,8 @@ export default function AnalyzePage() {
   const [minRoi, setMinRoi] = useState(30);
   const [minProfit, setMinProfit] = useState(2.0);
   const [overhead, setOverhead] = useState(15);
+  const [overheadMin, setOverheadMin] = useState(0);
+  const [prepFee, setPrepFee] = useState(0);
 
   const [priceBasis, setPriceBasis] = useState("min_selected");
   const [pbCurrent, setPbCurrent] = useState(true);
@@ -363,6 +365,7 @@ export default function AnalyzePage() {
           items,
           settings: {
             threshold, minRoi, overhead, minProfit, priceBasis,
+            overheadMin, prepFee,
             pbMap: { current: pbCurrent, avg30: pbAvg30, avg90: pbAvg90, avg180: pbAvg180, avg365: pbAvg365 },
             activeMonths, orderBasis, orderPct, phTargetMonths, useMonthlyLow,
             includeRating,
@@ -1024,13 +1027,25 @@ export default function AnalyzePage() {
           </Sec>
 
           <Sec title="Step 3 - Deal thresholds" d="0.2s">
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
               <SI label="Sales threshold" value={threshold} onChange={setThreshold} suffix="/mo"/>
               <SI label="Min ROI %" value={minRoi} onChange={setMinRoi} suffix="%"/>
               <SI label="Min profit $" value={minProfit} onChange={setMinProfit} prefix="$" step={0.5}/>
-              <SI label="Overhead %" value={overhead} onChange={setOverhead} suffix="%"/>
             </div>
-            <p className="text-ottrd-muted/50 text-xs mt-3">SKUs below min profit $ but above min ROI% are flagged orange. Overhead adds a % to cost for freight, prep, supplies.</p>
+
+            <div className="mt-5 pt-4 border-t border-ottrd-border">
+              <h3 className="text-sm font-medium text-ottrd-text mb-3">Overhead</h3>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <SI label="Overhead %" value={overhead} onChange={setOverhead} suffix="%"/>
+                <SI label="Overhead min $ (floor)" value={overheadMin} onChange={setOverheadMin} prefix="$" step={0.25}/>
+                <SI label="Prep fee $ / unit" value={prepFee} onChange={setPrepFee} prefix="$" step={0.25}/>
+              </div>
+              <p className="text-ottrd-muted/50 text-xs mt-3">
+                True cost = supplier cost + max(cost × overhead%, overhead min $) + prep fee $. The floor kicks in for low-cost items where the % alone wouldn't cover your real prep costs.
+              </p>
+            </div>
+
+            <p className="text-ottrd-muted/50 text-xs mt-3">SKUs below min profit $ but above min ROI% are flagged orange.</p>
             <div className="mt-4 pt-4 border-t border-ottrd-border">
               <label className="flex items-center gap-2 text-sm text-ottrd-muted cursor-pointer">
                 <input type="checkbox" checked={includeRating} onChange={e => setIncludeRating(e.target.checked)} className="accent-blue-500"/>

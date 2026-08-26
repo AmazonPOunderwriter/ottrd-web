@@ -39,6 +39,7 @@ export async function POST(request) {
 
         const {
           threshold = 50, minRoi = 30, overhead = 15, minProfit = 2,
+          overheadMin = 0, prepFee = 0,
           priceBasis = "min_selected",
           pbMap = { current: true, avg30: true, avg90: true, avg180: true, avg365: false },
           activeMonths = [1,2,3,4,5,6,7,8,9,10,11,12],
@@ -49,6 +50,8 @@ export async function POST(request) {
 
         const analysisSettings = {
           threshold, minRoi, overhead: overhead / 100,
+          overheadMin: overheadMin || 0,
+          prepFee: prepFee || 0,
           priceBasis, pbMap,
           activeMonths, orderBasis, orderPct: orderPct / 100,
           minProfit, phTargetMonths, useMonthlyLow,
@@ -109,7 +112,7 @@ export async function POST(request) {
           } catch (e) {
             send("log", { message: `   ${tag} failed: ${e.message}`, type: "error" });
             // Treat the whole batch as not-found so the user still sees rows
-            const notFound = batch.items.map(it => notFoundResult(it, analysisSettings.overhead));
+            const notFound = batch.items.map(it => notFoundResult(it, analysisSettings.overhead, analysisSettings.overheadMin, analysisSettings.prepFee));
             send("results-chunk", { results: notFound });
             doneItems += batch.items.length;
             const pct = Math.min(98, Math.round((doneItems / total) * 95) + 2);
@@ -132,7 +135,7 @@ export async function POST(request) {
               }
             }
             if (!allProds.length) {
-              chunkResults.push(notFoundResult(item, analysisSettings.overhead));
+              chunkResults.push(notFoundResult(item, analysisSettings.overhead, analysisSettings.overheadMin, analysisSettings.prepFee));
               continue;
             }
             for (const prod of allProds) {
