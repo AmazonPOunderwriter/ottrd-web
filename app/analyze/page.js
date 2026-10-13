@@ -22,6 +22,14 @@ function cleanCost(val) {
   try { return parseFloat(String(val).replace(/[$,]/g, "").trim()) || 0; } catch { return 0; }
 }
 
+function cleanAsin(val) {
+  if (val == null) return null;
+  const s = String(val).trim().toUpperCase();
+  if (!s || s === "NAN" || s === "NONE") return null;
+  if (!/^[A-Z0-9]{10}$/.test(s)) return null;
+  return s;
+}
+
 function autoCol(columns, candidates) {
   const colsLower = {};
   columns.forEach(c => { colsLower[c.toLowerCase()] = c; });
@@ -314,29 +322,55 @@ export default function AnalyzePage() {
     if (!rows.length) { setLogs(prev => [...prev, { message: "No data rows found in file.", type: "error" }]); setRunning(false); return; }
 
     const columns = Object.keys(rows[0]);
-    const upcCol = autoCol(columns, ["upc","barcode","ean","gtin","code"]);
+    // Detect ASIN first — a dedicated column, not confused with SKU.
+    const asinCol = autoCol(columns, ["asin"]);
+    // Only match UPC/EAN/GTIN as identifiers. Dropped "code" because it's
+    // too generic (would eat an "asin code" column or similar).
+    const upcCol = autoCol(columns, ["upc","barcode","ean","gtin"]);
     const costCol = autoCol(columns, ["cost","price","unit cost","wholesale","buy"]);
     const nameCol = autoCol(columns, ["name","title","product","description","item"]);
     const skuCol = autoCol(columns, ["sku","item #","part","model","item no"]);
     // Supplier-side quantity available (optional).
     const qtyCol = autoCol(columns, ["qty","quantity","available","stock","on hand","qoh","inventory","units"]);
 
-    if (!upcCol) { alert("Can't find UPC column in your file."); setRunning(false); return; }
+    // Need EITHER an ASIN column OR a UPC column (plus cost).
+    if (!asinCol && !upcCol) { alert("Can't find an ASIN or UPC/EAN column in your file."); setRunning(false); return; }
     if (!costCol) { alert("Can't find cost column in your file."); setRunning(false); return; }
 
     setLogs(prev => [...prev,
       { message: `Loaded: ${fileName} - ${rows.length} rows`, type: "info" },
-      { message: `UPC: ${upcCol} | Cost: ${costCol} | Name: ${nameCol || "(none)"} | SKU: ${skuCol || "(none)"} | Qty: ${qtyCol || "(none)"}` },
+      { message: `ASIN: ${asinCol || "(none)"} | UPC: ${upcCol || "(none)"} | Cost: ${costCol} | Name: ${nameCol || "(none)"} | SKU: ${skuCol || "(none)"} | Qty: ${qtyCol || "(none)"}` },
     ]);
 
     const items = [];
+    let asinCount = 0;
+    let upcCount = 0;
     for (const row of rows) {
-      const rawUpc = String(row[upcCol]).trim();
-      const variants = cleanUpc(rawUpc);
       const cost = cleanCost(row[costCol]);
-      if (!variants.length || cost <= 0) continue;
-      const primary = variants[0];
-      if (!primary || ["nan","none",""].includes(primary.toLowerCase())) continue;
+      if (cost <= 0) continue;
+
+      // Try ASIN first — it's the more reliable identifier when present.
+      const asin = asinCol ? cleanAsin(row[asinCol]) : null;
+
+      // UPC is a fallback (and used for the primary id when there's no ASIN).
+      let primary = null;
+      let variants = [];
+      if (upcCol) {
+        const rawUpc = String(row[upcCol] ?? "").trim();
+        if (rawUpc) {
+          variants = cleanUpc(rawUpc);
+          if (variants.length) {
+            const first = variants[0];
+            if (first && !["nan","none",""].includes(first.toLowerCase())) {
+              primary = first;
+            }
+          }
+        }
+      }
+
+      // Need at least one identifier
+      if (!asin && !primary) continue;
+
       // Supplier qty available (optional). Parse defensively — strings like "100",
       // "1,200", "Out of stock" should all be handled. Non-numeric -> null.
       let qtyAvail = null;
@@ -348,11 +382,21 @@ export default function AnalyzePage() {
           if (!isNaN(n) && n >= 0) qtyAvail = n;
         }
       }
-      items.push({ upc: primary, variants, cost, name: nameCol ? String(row[nameCol]).trim() : "", sku: skuCol ? String(row[skuCol]).trim() : "", qtyAvail });
+
+      items.push({
+        asin: asin || null,
+        upc: primary || "",
+        variants: variants,
+        cost,
+        name: nameCol ? String(row[nameCol]).trim() : "",
+        sku: skuCol ? String(row[skuCol]).trim() : "",
+        qtyAvail,
+      });
+      if (asin) asinCount++; else upcCount++;
     }
 
     if (!items.length) { setLogs(prev => [...prev, { message: "No valid rows found.", type: "error" }]); setRunning(false); return; }
-    setLogs(prev => [...prev, { message: `Valid items: ${items.length}`, type: "success" }]);
+    setLogs(prev => [...prev, { message: `Valid items: ${items.length} (${asinCount} by ASIN, ${upcCount} by UPC/EAN)`, type: "success" }]);
 
     const activeMonths = MONTH_NAMES.map((m, i) => monthFilters[m] ? i + 1 : null).filter(Boolean);
     const phTargetMonths = phOptions.filter(o => phSelected[o.key]).map(o => [o.year, o.month]);
@@ -961,7 +1005,7 @@ export default function AnalyzePage() {
               {fileName ? (<div><div className="text-3xl mb-2">{"📄"}</div><div className="text-ottrd-text font-medium">{fileName}</div><div className="text-ottrd-muted text-sm mt-1">Click or drop to replace</div></div>)
               : (<div><div className="text-3xl mb-2">{"📄"}</div><div className="text-ottrd-muted">Drop your CSV or Excel file here</div><div className="text-ottrd-muted/50 text-sm mt-1">or click to browse</div></div>)}
             </div>
-            <p className="text-ottrd-muted/60 text-xs mt-3">Needs a UPC column and a cost/price column at minimum.</p>
+            <p className="text-ottrd-muted/60 text-xs mt-3">Needs a cost column plus either a UPC/EAN column or an ASIN column. ASIN takes priority when both are present on a row.</p>
           </Sec>
 
           <Sec title="Step 2 - Amazon reports (optional)" d="0.1s">

@@ -1,8 +1,9 @@
-import { fetchKeepaBatch, analyzeItem, notFoundResult, last12Months } from "../../../lib/keepa";
+import { fetchKeepaBatch, fetchKeepaBatchByAsin, analyzeItem, notFoundResult, last12Months } from "../../../lib/keepa";
 
 export const maxDuration = 300;
 
-const MAX_CODES_PER_BATCH = 95; // Keepa max is 100 codes; leave headroom for variants
+const MAX_CODES_PER_BATCH = 95; // Keepa max is 100 codes; leave headroom for UPC variants
+const MAX_ASINS_PER_BATCH = 100; // ASINs are exact (no variants) — can hit the full cap
 const CONCURRENCY = 5;          // 5 batches in flight at once
 const TOKEN_FLOOR = 50;         // Pause if Keepa tokens drop below this
 const TOKEN_PAUSE_MS = 8000;    // Wait 8s before resuming when tokens are low
@@ -58,26 +59,50 @@ export async function POST(request) {
         };
 
         const total = items.length;
-        // Build batches by Keepa code count, not item count: each item may
-        // generate 1-2 UPC variants, and Keepa caps `code` param at 100.
+        // Split items by lookup type. ASIN beats UPC when both are present
+        // (more reliable + no variant resolution needed).
+        const asinItems = [];
+        const codeItems = [];
+        for (const item of items) {
+          if (item.asin && typeof item.asin === "string" && item.asin.trim()) {
+            asinItems.push(item);
+          } else {
+            codeItems.push(item);
+          }
+        }
+
+        // Build batches separately per type. Each batch is tagged with its
+        // `kind` so processBatch knows which Keepa endpoint to call.
         const batches = [];
+        // ASIN batches — simple fixed-size chunking since ASINs are exact.
+        for (let i = 0; i < asinItems.length; i += MAX_ASINS_PER_BATCH) {
+          batches.push({
+            idx: batches.length,
+            kind: "asin",
+            items: asinItems.slice(i, i + MAX_ASINS_PER_BATCH),
+          });
+        }
+        // UPC batches — pack by variant count since each item may expand to 1-2 codes.
         {
           let cur = [];
           let curCodes = 0;
-          for (const item of items) {
+          for (const item of codeItems) {
             const variantCount = (item.variants && item.variants.length) || 1;
             if (cur.length && curCodes + variantCount > MAX_CODES_PER_BATCH) {
-              batches.push({ idx: batches.length, items: cur });
+              batches.push({ idx: batches.length, kind: "code", items: cur });
               cur = [];
               curCodes = 0;
             }
             cur.push(item);
             curCodes += variantCount;
           }
-          if (cur.length) batches.push({ idx: batches.length, items: cur });
+          if (cur.length) batches.push({ idx: batches.length, kind: "code", items: cur });
         }
 
-        send("log", { message: `${total} SKUs split into ${batches.length} batches (${CONCURRENCY} concurrent, max ${MAX_CODES_PER_BATCH} codes/batch)`, type: "info" });
+        send("log", {
+          message: `${total} SKUs (${asinItems.length} by ASIN, ${codeItems.length} by UPC/EAN) split into ${batches.length} batches (${CONCURRENCY} concurrent)`,
+          type: "info",
+        });
         send("progress", { pct: 2, message: `Starting analysis of ${total} SKUs...` });
         // Tell the client we're using streaming results so it can prep the table early
         send("stream-start", { total, monthKeys: last12Months() });
@@ -87,7 +112,7 @@ export async function POST(request) {
 
         // Process a single batch: fetch from Keepa, analyze, emit chunk.
         async function processBatch(batch) {
-          const tag = `B${batch.idx + 1}/${batches.length}`;
+          const tag = `B${batch.idx + 1}/${batches.length}[${batch.kind}]`;
 
           // Backpressure: if we're near the token floor, hold off briefly.
           if (lastTokensLeft != null && lastTokensLeft < TOKEN_FLOOR) {
@@ -95,15 +120,20 @@ export async function POST(request) {
             await new Promise(r => setTimeout(r, TOKEN_PAUSE_MS));
           }
 
-          const allCodes = [];
-          for (const item of batch.items) {
-            allCodes.push(...(item.variants || [item.upc]));
-          }
-          const uniqueCodes = [...new Set(allCodes)];
-
           let keepaData = {};
           try {
-            const resp = await fetchKeepaBatch(uniqueCodes, apiKey, 1, 3, includeRating);
+            let resp;
+            if (batch.kind === "asin") {
+              const asinList = [...new Set(batch.items.map(it => String(it.asin).trim().toUpperCase()).filter(Boolean))];
+              resp = await fetchKeepaBatchByAsin(asinList, apiKey, 1, 3, includeRating);
+            } else {
+              const allCodes = [];
+              for (const item of batch.items) {
+                allCodes.push(...(item.variants || [item.upc]));
+              }
+              const uniqueCodes = [...new Set(allCodes)];
+              resp = await fetchKeepaBatch(uniqueCodes, apiKey, 1, 3, includeRating);
+            }
             keepaData = resp.data;
             if (resp.tokensLeft !== undefined) {
               lastTokensLeft = resp.tokensLeft;
@@ -111,7 +141,6 @@ export async function POST(request) {
             }
           } catch (e) {
             send("log", { message: `   ${tag} failed: ${e.message}`, type: "error" });
-            // Treat the whole batch as not-found so the user still sees rows
             const notFound = batch.items.map(it => notFoundResult(it, analysisSettings.overhead, analysisSettings.overheadMin, analysisSettings.prepFee));
             send("results-chunk", { results: notFound });
             doneItems += batch.items.length;
@@ -125,15 +154,30 @@ export async function POST(request) {
           for (const item of batch.items) {
             const seenAsins = new Set();
             const allProds = [];
-            for (const v of (item.variants || [item.upc])) {
-              for (const p of (keepaData[v] || [])) {
-                const asinKey = p.asin || "";
-                if (asinKey && !seenAsins.has(asinKey)) {
-                  seenAsins.add(asinKey);
+
+            if (batch.kind === "asin") {
+              // Direct ASIN lookup — keepaData is keyed by uppercase ASIN.
+              const asinKey = String(item.asin).trim().toUpperCase();
+              for (const p of (keepaData[asinKey] || [])) {
+                const k = p.asin || "";
+                if (k && !seenAsins.has(k)) {
+                  seenAsins.add(k);
                   allProds.push(p);
                 }
               }
+            } else {
+              // UPC/EAN lookup — walk every variant and dedupe by ASIN.
+              for (const v of (item.variants || [item.upc])) {
+                for (const p of (keepaData[v] || [])) {
+                  const asinKey = p.asin || "";
+                  if (asinKey && !seenAsins.has(asinKey)) {
+                    seenAsins.add(asinKey);
+                    allProds.push(p);
+                  }
+                }
+              }
             }
+
             if (!allProds.length) {
               chunkResults.push(notFoundResult(item, analysisSettings.overhead, analysisSettings.overheadMin, analysisSettings.prepFee));
               continue;
@@ -145,7 +189,6 @@ export async function POST(request) {
             }
           }
 
-          // Emit this chunk to the UI immediately
           send("results-chunk", { results: chunkResults });
 
           doneItems += batch.items.length;
